@@ -22,7 +22,7 @@ import type { ConversationEntry } from '../unified-api/types';
  * forces exactly that tool — providers reject parallel calls in this mode. */
 export type ForceToolChoice = 'any' | { name: string };
 
-export interface LlmCallConfig extends Omit<LlmEndpoint, 'maxImagesAllowed'> {
+export interface LlmCallConfig extends Omit<LlmEndpoint, 'maxImagesAllowed' | 'forceToolChoice'> {
   forceToolChoice?: ForceToolChoice;
 }
 

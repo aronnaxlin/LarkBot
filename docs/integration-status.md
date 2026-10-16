@@ -36,3 +36,53 @@ Follow-up: after the user added the message-receive event subscription in the Fe
 - Original A/B implementation documents and research describe earlier snapshots. This file records coordinator amendments until those documents are reconciled.
 
 Monitor: parent Loop #2, every 5 minutes, max 20 fires. Stop after final review or a user-action blocker. Do not automatically restart quota-blocked Claude agents.
+
+## First live end-to-end run (overnight test)
+
+The first real group-chat run validated the full pipeline for the first time:
+group message → canonical persistence → Probe → primary turn → `send_message`
+with a quoted reply plus a `react`, and a persisted synthetic self-event. The
+run also exposed three problems that only real traffic could surface.
+
+### Null-valued optional fields drop events
+
+Feishu sends absent optional fields (`parent_id`, `root_id`, `thread_id`,
+`mentions[].id.user_id`, ...) as explicit `null`, which the valibot schemas
+rejected as a type error. Every event was acknowledged and discarded, so the
+failure looked exactly like events never arriving. `src/feishu/events.ts` now
+drops nulls before parsing, and the two "outside configured group chats"
+filters log at `log` level rather than `debug`, because a mis-scoped chat
+filter is otherwise invisible in production.
+
+### Node 24.19+ aborts native addons compiled against its headers
+
+`better-sqlite3` aborted the process (`Statement::~Statement()` →
+`RemoveEnvironmentCleanupHook` → `Assertion failed: (env) != nullptr`) the
+moment real traffic reached the database. This is the Node regression
+`nodejs/node#65446` (and `#65262`): on 24.19.0+ the cleanup hook registry was
+backported without the hooks themselves. The abort follows the **headers the
+addon was compiled against**, not the runtime it loads into, so a prebuilt or
+locally compiled addon built against 24.19+ headers crashes everywhere, while
+one built against ≤24.18.1 headers runs cleanly on 24.19+ runtimes.
+
+This host now has `node 24.18.1` installed via mise and rebuilds native addons
+with it (`mise exec node@24.18.1 -- pnpm rebuild better-sqlite3`; `nodedir` in
+`build/config.gypi` confirms 24.18.1 headers). The application itself keeps
+running on the pinned `lts` (24.21.0) runtime.
+
+### Thinking-mode providers reject a forced tool_choice
+
+Command Code's DeepSeek V4.1 Flash runs in thinking mode and answers a forced
+`tool_choice` with `400 Thinking mode does not support this tool_choice`.
+`models.<name>.forceToolChoice: false` now omits `tool_choice` for such
+endpoints, for both the Probe (`{ name: 'decide' }`) and the primary turn
+(`'any'`). The model still calls the required tool without being forced; what
+is lost is the runner's "requirement not met, retry" safety net.
+
+### Still open
+
+- `contact.user.get` returns `99991672` without the contact scope, so display
+  names fall back to the name seen in a mention. Stable `open_id` identities
+  are unaffected.
+- `read_image` is registered even where the platform cannot fetch attachments,
+  so the model spends a tool call before learning that. It fails gracefully.

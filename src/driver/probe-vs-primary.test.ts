@@ -38,7 +38,7 @@ const makeChatConfig = (): ResolvedChatConfig => ({
   imageToText: { enabled: false, maxConcurrency: 1 },
   animationToText: { enabled: false, maxFrames: 0, maxConcurrency: 1 },
   customEmojiToText: { enabled: false, maxFrames: 0, maxConcurrency: 1 },
-  tools: { banSpammer: false, bash: { backgroundThresholdSec: 10 } },
+  tools: { banSpammer: false, bash: { enabled: true, backgroundThresholdSec: 10 } },
 });
 
 const buildRC = (): RenderedContext => [
@@ -307,6 +307,67 @@ describe('probe vs primary view of bot\'s own messages', () => {
     expect(primaryCallCount).toBe(1);
     expect(mockCallLlm.mock.calls.map(call => call[0]!.forceToolChoice)).toEqual([{ name: 'decide' }, 'any']);
     expect(sendMessageCalls).toEqual([]);
+
+    driver.stop();
+  });
+
+  it('omits tool_choice when the endpoint rejects a forced choice', async () => {
+    mockCallLlm.mockReset();
+
+    mockCallLlm.mockImplementation(async config => ({
+      entries: [{
+        kind: 'message', role: 'assistant', reasoning: undefined,
+        parts: [config.model === 'mock-probe'
+          ? { kind: 'toolCall', callId: 'p1', name: 'decide', args: JSON.stringify({ should_act: 'send_message', reason: 'addressed' }) }
+          : { kind: 'toolCall', callId: 'pr1', name: 'end_turn', args: '{}' }],
+      }],
+      usage: { inputTokens: 10, outputTokens: 5, cacheReadTokens: 0, cacheWriteTokens: 0 },
+    }));
+
+    const chatConfig = makeChatConfig();
+    chatConfig.primary.model.forceToolChoice = false;
+    chatConfig.probe.model.forceToolChoice = false;
+    const persistedTRs: TurnResponseV2[] = [];
+
+    const driver = createDriver(
+      { chatIds: ['-100124'], resolveChatConfig: () => chatConfig },
+      {
+        name: 'telegram',
+        loadTurnResponses: async () => [...persistedTRs],
+        persistTurnResponse: async (_, tr) => { persistedTRs.push(tr); },
+        persistProbeResponse: async () => {},
+        sendMessage: async () => ({ messageId: '999' }),
+        banSpammer: async () => ({ status: 'rejected' as const, reason: 'unknown_message' as const }),
+        setMessageReaction: async () => {},
+        sendTypingAction: async () => {},
+        onDebounceStateChange: () => {},
+        loadCompaction: () => null,
+        loadLastProbeTime: () => 0,
+        persistCompaction: () => {},
+        setCompactCursor: () => [],
+        getChatTitle: () => 'Test',
+        runtimeConfig: { shell: ['/bin/bash', '-c'], writeFile: ['cat'], readFile: ['cat'], writeFileSizeLimit: 1024, readFileSizeLimit: 1024 },
+        loadMessageAttachments: () => undefined,
+        messageExists: () => true,
+        downloadMessageMedia: async () => undefined,
+        readOldMessages: () => '',
+        resolveModel: () => ({ apiBaseUrl: 'mock', apiKey: 'k', model: 'mock', apiFormat: 'openai-chat' }),
+        backgroundTask: {
+          startTask: () => 0,
+          killTask: () => ({ ok: true }),
+          getActiveTasks: () => [],
+          readTaskOutput: async () => ({ content: '', totalLines: 0, truncated: false }),
+        },
+        logger,
+      },
+    );
+
+    driver.handleEvent('-100124', buildRC());
+    await vi.waitFor(() => expect(persistedTRs).toHaveLength(1), { timeout: 1000, interval: 10 });
+
+    // The probe still runs and still decides, but neither request carries tool_choice.
+    expect(mockCallLlm.mock.calls.map(call => call[0]!.model)).toEqual(['mock-probe', 'mock-primary']);
+    expect(mockCallLlm.mock.calls.map(call => call[0]!.forceToolChoice)).toEqual([undefined, undefined]);
 
     driver.stop();
   });

@@ -131,7 +131,9 @@ export const createFeishuIngress = (deps: {
     if (!event) return;
     const { chat_id: chatId, chat_type: chatType, message_id: messageId } = event.message;
     if (chatType !== 'group' || !deps.configuredChatIds.has(chatId)) {
-      log.withFields({ chatId, chatType }).debug('Message outside configured group chats ignored');
+      // Log level, not debug: a mis-scoped chat filter is otherwise invisible
+      // in production and looks exactly like events never arriving.
+      log.withFields({ chatId, chatType }).log('Message outside configured group chats ignored');
       return;
     }
 
@@ -161,7 +163,10 @@ export const createFeishuIngress = (deps: {
     const meta = captureMeta();
     const event = parseOrLog('im.message.recalled_v1', () => parseMessageRecalledEvent(data));
     if (!event) return;
-    if (!deps.configuredChatIds.has(event.chat_id)) return;
+    if (!deps.configuredChatIds.has(event.chat_id)) {
+      log.withFields({ chatId: event.chat_id }).log('Recall outside configured group chats ignored');
+      return;
+    }
     await ingest(event.chat_id, recallDedupKey(event.message_id), async () => {
       log.withFields({ chatId: event.chat_id, messageId: event.message_id }).log('Message recalled');
       return adaptFeishuRecall(event, meta);

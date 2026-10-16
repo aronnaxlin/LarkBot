@@ -18,6 +18,7 @@ const llmEndpointEntries = {
   apiFormat: v.optional(v.picklist(['openai-chat', 'responses', 'anthropic-messages'])),
   maxImagesAllowed: v.optional(v.number()),
   timeoutSec: v.optional(v.number()),
+  forceToolChoice: v.optional(v.boolean(), true),
   extraBody: v.optional(v.record(v.string(), v.unknown())),
 };
 
@@ -86,6 +87,9 @@ const ChatConfigSchema = v.object({
   tools: v.object({
     banSpammer: v.optional(v.boolean(), false),
     bash: v.optional(v.object({
+      // Runs on the host with no sandbox. Keep false until an isolated
+      // execution backend exists.
+      enabled: v.optional(v.boolean(), true),
       backgroundThresholdSec: v.optional(v.number(), 10),
     }), {}),
     web: v.optional(v.object({
@@ -143,6 +147,7 @@ const ChatOverrideSchema = v.optional(v.partial(v.object({
   tools: v.partial(v.object({
     banSpammer: v.boolean(),
     bash: v.partial(v.object({
+      enabled: v.boolean(),
       backgroundThresholdSec: v.number(),
     })),
     web: v.partial(v.object({
@@ -212,7 +217,7 @@ export interface ResolvedChatConfig {
   customEmojiToText: { enabled: boolean; model?: string; maxFrames: number; maxConcurrency: number };
   tools: {
     banSpammer: boolean;
-    bash: { backgroundThresholdSec: number };
+    bash: { enabled: boolean; backgroundThresholdSec: number };
     webSearch?: WebSearchConfig;
     webFetch?: WebFetchConfig;
   };
@@ -335,7 +340,10 @@ export const resolveChatConfig = (config: Config, chatId: string): ResolvedChatC
     },
     tools: {
       banSpammer: merged.tools.banSpammer,
-      bash: { backgroundThresholdSec: merged.tools.bash.backgroundThresholdSec },
+      bash: {
+        enabled: merged.tools.bash.enabled,
+        backgroundThresholdSec: merged.tools.bash.backgroundThresholdSec,
+      },
       ...(webSearch ? { webSearch } : {}),
       ...(webFetch ? { webFetch } : {}),
     },

@@ -1,5 +1,7 @@
 # Driver Development Guide
 
+> This guide describes the inherited Cahciua driver. Follow [AGENTS.md](../AGENTS.md) for LarkBot's direction. Mandatory speech, probe routing, and scheduling policies below describe current behavior, not permanent requirements; change them with regression coverage when implementing the agreed LarkBot behavior.
+
 ## Boundaries
 
 Driver is deliberately explicit rather than plugin-driven. New behavior must fit one existing owner before a new abstraction is introduced.
@@ -29,7 +31,7 @@ Probe is not a generic tool-loop feature. Compaction is not a turn feature. Keep
 
 Tool results return `requiresFollowUp`. `send_message` maps its `still_working` argument to that flag. A terminal tool must return `false`; tools whose result requires another model step return `true`.
 
-Do not introduce a silence tool. Activated primary wake-ups must send at least one message.
+The current driver requires a message after activation and has no silence tool. LarkBot must allow legitimate silence and reaction-only completion; when implementing this, choose the smallest explicit termination mechanism and update runtime prompts, forced-send fallback, and tests together.
 
 `ban_spammer` is opt-in through `tools.banSpammer` (default false), enforced at tool exposure and backend authorization. Group decision policy lives in chat `systemFiles` and reaches both probe and primary. The callback is bound to the current chat; its inputs are an evidence message ID and a private reason. The Telegram service owns membership, permission, sender, and count checks. After a confirmed ban, the tool result supplies an exact announcement with a `tg://user?id=...` link labeled "spam 账号". Primary calls `send_message` with exactly one argument, `text`, containing that announcement. Names, usernames, profile text, spam content, media, and audit reasoning stay in the private assessment. Partial cleanup receives its own factual announcement.
 
@@ -37,7 +39,7 @@ Deployment-local group policies can identify eligible accounts through sufficien
 
 ## Adding Wake-Up Behavior
 
-Probe and primary logic lives in `executeWakeup()`. Changes must preserve:
+Probe and primary logic lives in `executeWakeup()`. Current behavior to cover when modifying this flow:
 
 - invalid probe output fails closed;
 - probe persistence precedes primary activation;
@@ -46,7 +48,7 @@ Probe and primary logic lives in `executeWakeup()`. Changes must preserve:
 - fallback searches the current interruption chain for an earlier send;
 - typing begins only after activation and stops in `finally`.
 
-Add characterization tests in `driver-characterization.test.ts` before changing any of these rules.
+Preserve persistence ordering and cleanup guarantees. Probe bypass and forced-send rules may change for LarkBot; update affected expectations and add regression tests in `driver-characterization.test.ts` or the relevant focused test file.
 
 ## Runner Changes
 
@@ -64,7 +66,7 @@ Do not add abort checks between model output, side effects, and persistence. Tha
 
 The scheduler is the only owner of debounce timers. It receives signals from the chat scope and calls a wake-up executor with an RC snapshot.
 
-Preserve trigger-sender semantics and hard-cap behavior. Use fake timers for tests. Scheduler cleanup cancels pending timers but does not preempt an already-running LLM/tool operation.
+Current scheduling uses trigger-sender semantics and a debounce hard cap. These policies may change with tests; new messages must not indefinitely reset active execution budgets. Use fake timers for scheduling tests. Scheduler cleanup currently cancels pending timers but does not preempt an already-running LLM/tool operation.
 
 ## Compaction Changes
 

@@ -27,7 +27,7 @@ describe('ban_spammer tool', () => {
     const ban = vi.fn(async () => completed);
     const result = await createBanSpammerTool(ban).execute({ message_id: '1', reason: 'Private spam content and attacker name' });
     const payload = JSON.parse(result.content as string);
-    expect(ban).toHaveBeenCalledWith(1);
+    expect(ban).toHaveBeenCalledWith('1');
     expect(result.requiresFollowUp).toBe(true);
     expect(payload.announcement).toBe('已踢出并永久封禁 [spam 账号](tg://user?id=456)，已清理记录中可删除的消息。');
     expect(result.content).not.toContain('Private spam content');

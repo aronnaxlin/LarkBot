@@ -88,8 +88,14 @@ export const events = sqliteTable('events', {
 
   // Runtime event data — JSON for runtime-originated events
   runtimeData: text('runtime_data', { mode: 'json' }).$type<RuntimeEventData>(),
+
+  // Platform delivery idempotency key, scoped per chat and per action kind so a
+  // recall never collides with the message it targets. NULL when the platform
+  // has no redelivery semantics (Telegram).
+  dedupKey: text('dedup_key'),
 }, table => [
   index('events_chat_id_idx').on(table.chatId),
+  uniqueIndex('events_chat_dedup_idx').on(table.chatId, table.dedupKey),
 ]);
 
 export const turnResponses = sqliteTable('turn_responses', {

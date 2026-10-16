@@ -75,51 +75,6 @@ const trHasToolCalls = (tr: TurnResponseV2): boolean =>
   tr.entries.some(e => e.kind === 'message' && e.role === 'assistant'
     && e.parts.some(p => p.kind === 'toolCall'));
 
-const wasSendMessageSuccessful = (tr: TurnResponseV2): boolean => {
-  const callIds = new Set<string>();
-  for (const entry of tr.entries) {
-    if (entry.kind !== 'message' || entry.role !== 'assistant') continue;
-    for (const part of entry.parts)
-      if (part.kind === 'toolCall' && part.name === 'send_message') callIds.add(part.callId);
-  }
-  for (const entry of tr.entries) {
-    if (entry.kind !== 'toolResult' || !callIds.has(entry.callId) || typeof entry.payload !== 'string') continue;
-    const payload = JSON.parse(entry.payload) as { ok?: unknown };
-    if (payload.ok === true) return true;
-  }
-  return false;
-};
-
-/** Did this TR exit via interrupt-style continuation? — i.e. at least one of
- * its toolResults had requiresFollowUp=true, meaning the runner intended to
- * keep going. Per-TR variant of `wasToolLoopInterrupted` (which only checks
- * the latest TR). */
-const trWasInterrupted = (tr: TurnResponseV2): boolean => {
-  for (const e of tr.entries)
-    if (e.kind === 'toolResult' && e.requiresFollowUp) return true;
-  return false;
-};
-
-// A wake-up is the structural chain joined by requiresFollowUp results. A clean
-// TR boundary starts a fresh probe-activated wake-up and stops the backward scan.
-export const loopEndedWithoutSendMessage = (trs: TurnResponseV2[]): boolean => {
-  if (trs.length === 0) return false;
-  const endIdx = trs.length - 1;
-  const ended = trs[endIdx]!.entries.some(entry =>
-    entry.kind === 'message'
-    && entry.role === 'assistant'
-    && entry.parts.some(part => part.kind === 'toolCall' && part.name === 'end_turn'));
-  if (!ended) return false;
-
-  for (let i = endIdx; i >= 0; i--) {
-    if (wasSendMessageSuccessful(trs[i]!)) return false;
-    if (i === 0) break;
-    // A clean previous TR is the boundary of this wake-up chain.
-    if (!trWasInterrupted(trs[i - 1]!)) break;
-  }
-  return true;
-};
-
 export const wasToolLoopInterrupted = (trs: TurnResponseV2[]): boolean => {
   if (trs.length === 0) return false;
   const entries = trs[trs.length - 1]!.entries;

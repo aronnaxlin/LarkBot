@@ -1,8 +1,8 @@
 import { describe, expect, it, vi } from 'vitest';
 
-import { createTelegramEventSink } from './event-sink';
-import type { CanonicalMessageEvent } from '../adaptation/types';
-import type { RenderedContext } from '../rendering/types';
+import type { CanonicalMessageEvent } from './adaptation/types';
+import { createEventSink } from './event-sink';
+import type { RenderedContext } from './rendering/types';
 
 const event = (chatId: string): CanonicalMessageEvent => ({
   type: 'message',
@@ -16,13 +16,13 @@ const event = (chatId: string): CanonicalMessageEvent => ({
   attachments: [],
 });
 
-describe('createTelegramEventSink', () => {
+describe('createEventSink', () => {
   it('persists unconfigured events without hydration or publication', () => {
     const persistEvent = vi.fn();
     const hydrateAltText = vi.fn();
     const pushPipelineEvent = vi.fn();
     const handleDriverEvent = vi.fn();
-    const sink = createTelegramEventSink({
+    const sink = createEventSink({
       configuredChatIds: new Set(['configured']),
       persistEvent,
       hydrateAltText,
@@ -41,7 +41,7 @@ describe('createTelegramEventSink', () => {
   it('publishes configured events in hydrate, pipeline, driver order', () => {
     const order: string[] = [];
     const rendered: RenderedContext = [{ receivedAtMs: 1, content: [{ type: 'text', text: 'x' }] }];
-    const sink = createTelegramEventSink({
+    const sink = createEventSink({
       configuredChatIds: new Set(['configured']),
       persistEvent: () => order.push('persist'),
       hydrateAltText: () => order.push('hydrate'),
@@ -58,7 +58,7 @@ describe('createTelegramEventSink', () => {
 
   it('can publish synthetic events without notifying Driver', () => {
     const handleDriverEvent = vi.fn();
-    const sink = createTelegramEventSink({
+    const sink = createEventSink({
       configuredChatIds: new Set(['configured']),
       persistEvent: vi.fn(),
       hydrateAltText: vi.fn(),
@@ -77,7 +77,7 @@ describe('createTelegramEventSink', () => {
     const handleDriverEvent = vi.fn()
       .mockImplementationOnce(() => { throw new Error('driver unavailable'); })
       .mockImplementationOnce(() => {});
-    const sink = createTelegramEventSink({
+    const sink = createEventSink({
       configuredChatIds: new Set(['configured']),
       persistEvent,
       hydrateAltText,

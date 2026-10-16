@@ -1,0 +1,67 @@
+import { canonicalMessageExists, hasEventDedupKey, persistDedupedEvent } from '../../db';
+import {
+  createFeishuBotIdentity,
+  createFeishuDriverPlatform,
+  createFeishuIngress,
+  createFeishuSdk,
+  createFeishuUserNames,
+  loadFeishuCredentials,
+} from '../../feishu';
+import type { PlatformRuntime } from '../../startup/platform';
+import type { Registrar } from '../registrar';
+import { TOKENS } from '../tokens';
+
+// Feishu services are resolved only when `platform: feishu`; nothing here
+// touches TDLib.
+export const registerFeishu = ({ get, register }: Registrar): void => {
+  register(TOKENS.FEISHU_SDK, () =>
+    createFeishuSdk(loadFeishuCredentials(get(TOKENS.CONFIG).feishu.credentialsFile), get(TOKENS.LOGGER)));
+
+  register(TOKENS.FEISHU_BOT_IDENTITY, () => createFeishuBotIdentity(get(TOKENS.FEISHU_SDK).api));
+
+  register(TOKENS.FEISHU_INGRESS, () => {
+    const db = get(TOKENS.DB);
+    const pipeline = get(TOKENS.PIPELINE);
+    const logger = get(TOKENS.LOGGER);
+    return createFeishuIngress({
+      configuredChatIds: get(TOKENS.CONFIGURED_CHAT_IDS),
+      userNames: createFeishuUserNames({
+        fetchName: get(TOKENS.FEISHU_SDK).api.getUserName,
+        fallbackName: (chatId, openId) => pipeline.getIC(chatId)?.users.get(openId)?.user.displayName,
+        logger,
+      }),
+      store: {
+        hasDedupKey: (chatId, dedupKey) => hasEventDedupKey(db, chatId, dedupKey),
+        persist: (event, dedupKey) => persistDedupedEvent(db, event, dedupKey),
+      },
+      sink: get(TOKENS.EVENT_SINK),
+      logger,
+    });
+  });
+
+  register(TOKENS.FEISHU_DRIVER_PLATFORM, () => {
+    const db = get(TOKENS.DB);
+    return createFeishuDriverPlatform({
+      api: get(TOKENS.FEISHU_SDK).api,
+      botInfo: get(TOKENS.FEISHU_BOT_IDENTITY).info,
+      acceptSelfSent: get(TOKENS.FEISHU_INGRESS).acceptSelfSent,
+      messageExists: (chatId, messageId) => canonicalMessageExists(db, chatId, messageId),
+      logger: get(TOKENS.LOGGER),
+    });
+  });
+
+  register(TOKENS.FEISHU_RUNTIME, (): PlatformRuntime => {
+    const sdk = get(TOKENS.FEISHU_SDK);
+    const ingress = get(TOKENS.FEISHU_INGRESS);
+    return {
+      // Handlers are bound to the long connection when it starts.
+      startIngress: () => {},
+      start: () => sdk.start({
+        onMessageReceive: ingress.handleMessageReceive,
+        onMessageRecalled: ingress.handleMessageRecalled,
+      }),
+      stop: async () => sdk.stop(),
+      runPostStartup: async () => {},
+    };
+  });
+};

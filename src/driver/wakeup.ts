@@ -1,11 +1,13 @@
 import type { Logger } from '@guiiai/logg';
 
-import { composeContext, composeProbeContext, injectLateBindingPrompt, latestExternalEventMs, loopEndedWithoutSendMessage, wasToolLoopInterrupted } from './context';
+import { composeContext, composeProbeContext, injectLateBindingPrompt, latestExternalEventMs, wasToolLoopInterrupted } from './context';
+import type { DriverPlatform } from './platform';
 import { renderLateBindingPrompt, renderSystemPrompt } from './prompt';
 import type { createRunner } from './runner';
 import { createDecideTool, extractDecideResult, toToolSchema } from './tools';
 import type { CahciuaTool } from './tools';
-import type { ProbeResponseV2, ResolvedChatConfig, TurnResponseV2 } from './types';
+import { countParticipationCalls, countWorkToolCalls, DEFAULT_TURN_BUDGET } from './turn-loop';
+import type { ProbeResponseV2, ResolvedChatConfig, TurnBudget, TurnBudgetUsage, TurnResponseV2 } from './types';
 import type { ActiveTaskInfo } from '../background-task/types';
 import { callLlm } from '../llm/call';
 import type { RenderedContext } from '../rendering/types';
@@ -22,9 +24,28 @@ const localTimeNow = (): string => {
   return `${local}${timezone}`;
 };
 
+const hasFollowUp = (tr: TurnResponseV2): boolean =>
+  tr.entries.some(entry => entry.kind === 'toolResult' && entry.requiresFollowUp);
+
+// Budget already spent by the open interruption chain: the latest TR plus each
+// earlier TR whose follow-up continued into it. Derived from persisted TRs, so
+// continuations (including after restart) cannot reset the counts.
+export const interruptedChainUsage = (trs: TurnResponseV2[]): TurnBudgetUsage => {
+  const used: TurnBudgetUsage = { toolRounds: 0, toolCalls: 0 };
+  for (let i = trs.length - 1; i >= 0; i--) {
+    used.toolRounds++;
+    used.toolCalls += countWorkToolCalls(trs[i]!.entries);
+    used.participationCalls = (used.participationCalls ?? 0) + countParticipationCalls(trs[i]!.entries);
+    if (i === 0 || !hasFollowUp(trs[i - 1]!)) break;
+  }
+  return used;
+};
+
 export const executeWakeup = async (params: {
   chatId: string;
   chatConfig: ResolvedChatConfig;
+  // Platform name rendered into prompts; selects platform-specific formatting.
+  currentChannel: DriverPlatform['name'];
   contextAtStart: RenderedContext;
   currentContext: () => RenderedContext;
   cursorMs?: number;
@@ -39,8 +60,11 @@ export const executeWakeup = async (params: {
   runner: Pick<ReturnType<typeof createRunner>, 'runStepLoop'>;
   getLastProcessedMs: () => number;
   setLastProcessedMs: (value: number) => void;
+  turnBudget?: TurnBudget;
   log: Logger;
 }): Promise<void> => {
+  const budget = params.turnBudget ?? DEFAULT_TURN_BUDGET;
+  const deadlineAtMs = Date.now() + budget.deadlineMs;
   const turnResponses = await params.loadTurnResponses(params.chatId, params.cursorMs);
   const primaryContext = composeContext(
     params.contextAtStart,
@@ -49,7 +73,10 @@ export const executeWakeup = async (params: {
     params.chatConfig.primary.model.model,
     params.summary,
   );
-  if (!primaryContext) return;
+  if (!primaryContext) {
+    if (wasToolLoopInterrupted(turnResponses)) throw new Error('Cannot compose context for an open tool continuation');
+    return;
+  }
 
   params.log.withFields({
     chatId: params.chatId,
@@ -77,7 +104,7 @@ export const executeWakeup = async (params: {
 
     const system = await renderSystemPrompt({
       mode: 'probe',
-      currentChannel: 'telegram',
+      currentChannel: params.currentChannel,
       modelName: params.chatConfig.probe.model.model,
       chatId: params.chatId,
       chatTitle: params.getChatTitle(params.chatId),
@@ -86,14 +113,18 @@ export const executeWakeup = async (params: {
     const entries = [...probeContext.entries];
     injectLateBindingPrompt(entries, await renderLateBindingPrompt({
       mode: 'probe',
+      currentChannel: params.currentChannel,
       timeNow,
       activeBackgroundTasks: backgroundTasks,
     }));
 
     const decideTool = createDecideTool();
     const requestedAtMs = Date.now();
+    const remainingSec = (deadlineAtMs - Date.now() - budget.minModelCallMs) / 1000;
+    if (remainingSec <= 0) throw new Error('Turn deadline reached before probe');
+    const probeTimeout = params.chatConfig.probe.model.timeoutSec;
     const result = await callLlm(
-      { ...params.chatConfig.probe.model, forceToolChoice: { name: 'decide' } },
+      { ...params.chatConfig.probe.model, timeoutSec: probeTimeout ? Math.min(probeTimeout, remainingSec) : remainingSec, forceToolChoice: { name: 'decide' } },
       entries,
       system,
       [decideTool].map(toToolSchema),
@@ -142,7 +173,7 @@ export const executeWakeup = async (params: {
   try {
     const system = await renderSystemPrompt({
       mode: 'primary',
-      currentChannel: 'telegram',
+      currentChannel: params.currentChannel,
       modelName: params.chatConfig.primary.model.model,
       chatId: params.chatId,
       chatTitle: params.getChatTitle(params.chatId),
@@ -150,6 +181,7 @@ export const executeWakeup = async (params: {
     });
     injectLateBindingPrompt(primaryContext.entries, await renderLateBindingPrompt({
       mode: 'primary',
+      currentChannel: params.currentChannel,
       timeNow,
       isInterrupted: interrupted,
       activeBackgroundTasks: backgroundTasks,
@@ -176,8 +208,11 @@ export const executeWakeup = async (params: {
       entries: primaryContext.entries,
       system,
       tools,
-      maxSteps: Infinity,
+      budget,
+      ...(interrupted ? { budgetUsed: interruptedChainUsage(turnResponses) } : {}),
+      deadlineAtMs,
       maxImagesAllowed: params.chatConfig.primary.model.maxImagesAllowed,
+      // `end_turn` is a tool, so forcing a tool call still permits silence.
       forceToolChoice: 'any',
       onStepComplete: persistStep,
       checkInterrupt: () =>
@@ -185,23 +220,6 @@ export const executeWakeup = async (params: {
         && latestExternalEventMs(params.currentContext(), params.getLastProcessedMs()) != null,
       log: params.log,
     });
-
-    const latestTurnResponses = await params.loadTurnResponses(params.chatId, params.cursorMs);
-    if (loopEndedWithoutSendMessage(latestTurnResponses)) {
-      params.log.withFields({ chatId: params.chatId }).log('Loop ended without send_message — running forced fallback');
-      await params.runner.runStepLoop({
-        chatId: params.chatId,
-        entries: primaryContext.entries,
-        system,
-        tools,
-        maxSteps: 1,
-        maxImagesAllowed: params.chatConfig.primary.model.maxImagesAllowed,
-        forceToolChoice: { name: 'send_message' },
-        onStepComplete: persistStep,
-        checkInterrupt: () => false,
-        log: params.log,
-      });
-    }
   } finally {
     if (typingInterval) clearInterval(typingInterval);
   }

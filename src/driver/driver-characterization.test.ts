@@ -6,7 +6,9 @@ vi.mock('../llm/call', () => ({ callLlm: vi.fn() }));
 import { createDriver } from './index';
 import { createRunner } from './runner';
 import { createTool } from './tools/create-tool';
-import type { ProbeResponseV2, TurnResponseV2 } from './types';
+import { DEFAULT_TURN_BUDGET } from './turn-loop';
+import type { ProbeResponseV2, TurnBudget, TurnResponseV2 } from './types';
+import { interruptedChainUsage } from './wakeup';
 import type { ResolvedChatConfig } from '../config/config';
 import type { LlmCallUsage } from '../llm/call';
 import { callLlm } from '../llm/call';
@@ -31,9 +33,12 @@ const toolCallEntries = (callId: string, name: string, args = '{}'): Conversatio
   reasoning: undefined,
 }];
 
+const roundsBudget = (maxToolRounds: number): TurnBudget => ({ ...DEFAULT_TURN_BUDGET, maxToolRounds });
+
 const makeChatConfig = (): ResolvedChatConfig => ({
   primary: {
     model: { apiBaseUrl: 'mock', apiKey: 'key', model: 'mock-primary', apiFormat: 'openai-chat' },
+    turnBudget: DEFAULT_TURN_BUDGET,
   },
   systemFiles: [],
   sendTypingAction: false,
@@ -61,10 +66,11 @@ const buildExternalContext = (receivedAtMs = 1000): RenderedContext => [{
 type DriverDeps = Parameters<typeof createDriver>[1];
 
 const makeDriverDeps = (overrides: Partial<DriverDeps> = {}): DriverDeps => ({
+  name: 'telegram',
   loadTurnResponses: async () => [],
   persistTurnResponse: async () => {},
   persistProbeResponse: async () => {},
-  sendMessage: async () => ({ messageId: 1, date: 0 }),
+  sendMessage: async () => ({ messageId: '1' }),
   banSpammer: async () => ({ status: 'rejected' as const, reason: 'unknown_message' as const }),
   setMessageReaction: async () => {},
   sendTypingAction: async () => {},
@@ -136,7 +142,7 @@ describe('Driver probe gate characterization', () => {
   it.each(failClosedCases)('fails closed on $name and persists the rejected probe', async ({ entries }) => {
     const persistedProbes: ProbeResponseV2[] = [];
     const persistedTurns: TurnResponseV2[] = [];
-    const sendMessage = vi.fn(async () => ({ messageId: 1, date: 0 }));
+    const sendMessage = vi.fn(async () => ({ messageId: '1' }));
     const probeUsage = makeUsage(11, 7, 3, 2);
     mockCallLlm.mockResolvedValue({ entries, usage: probeUsage });
 
@@ -222,6 +228,70 @@ describe('Driver probe gate characterization', () => {
   });
 });
 
+const workTurn = (requestedAtMs: number, requiresFollowUp: boolean, name = 'bash'): TurnResponseV2 => ({
+  requestedAtMs,
+  modelName: 'mock-primary',
+  inputTokens: 1,
+  outputTokens: 1,
+  cacheReadTokens: 0,
+  cacheWriteTokens: 0,
+  entries: [
+    ...toolCallEntries(`call-${requestedAtMs}`, name),
+    { kind: 'toolResult', callId: `call-${requestedAtMs}`, payload: '{}', requiresFollowUp },
+  ],
+});
+
+describe('Turn budget across interruption chains', () => {
+  it('counts only the open chain after the last closed turn', () => {
+    expect(interruptedChainUsage([
+      workTurn(100, true),
+      workTurn(200, false),
+      workTurn(300, true),
+      workTurn(400, true, 'send_message'),
+    ])).toEqual({ toolRounds: 2, toolCalls: 1, participationCalls: 1 });
+  });
+
+  it('continues an exhausted chain without probe at the wrap-up, then gives a new topic a fresh probe and budget', async () => {
+    const persistedTurns: TurnResponseV2[] = [workTurn(500, true), workTurn(600, true)];
+    const persistedProbes: ProbeResponseV2[] = [];
+    mockCallLlm.mockImplementation(async config => config.model === 'mock-probe'
+      ? {
+          entries: toolCallEntries('probe', 'decide', JSON.stringify({ should_act: 'send_message', reason: 'new topic' })),
+          usage: makeUsage(),
+        }
+      : { entries: toolCallEntries(`end-${mockCallLlm.mock.calls.length}`, 'end_turn'), usage: makeUsage() });
+
+    const driver = startDriver('chain-budget', makeDriverDeps({
+      loadTurnResponses: async () => [...persistedTurns],
+      persistTurnResponse: async (_chatId, turn) => { persistedTurns.push(turn); },
+      persistProbeResponse: async (_chatId, probe) => { persistedProbes.push(probe); },
+      loadLastProbeTime: () => 0,
+    }));
+    driver.handleEvent('chain-budget', buildExternalContext(1000));
+
+    await vi.waitFor(() => expect(persistedTurns).toHaveLength(3), { timeout: 2000 });
+    expect(mockCallLlm).toHaveBeenCalledTimes(1);
+    expect(mockCallLlm.mock.calls[0]![0].model).toBe('mock-primary');
+    expect(mockCallLlm.mock.calls[0]![3]?.map(schema => schema.name)).toEqual(['send_message', 'react', 'end_turn']);
+    expect(persistedTurns[2]!.entries.some(entry => entry.kind === 'toolResult' && entry.requiresFollowUp)).toBe(false);
+    expect(persistedProbes).toEqual([]);
+
+    driver.handleEvent('chain-budget', [
+      ...buildExternalContext(1000),
+      {
+        receivedAtMs: Date.now() + 1,
+        senderId: 'user-2',
+        content: [{ type: 'text', text: '<message id="2" sender="Bob (@bob)" t="2025-01-01T00:00:02+00:00">unrelated topic</message>' }],
+      },
+    ]);
+
+    await vi.waitFor(() => expect(persistedTurns).toHaveLength(4), { timeout: 2000 });
+    expect(persistedProbes).toHaveLength(1);
+    expect(mockCallLlm.mock.calls[1]![0].model).toBe('mock-probe');
+    expect(mockCallLlm.mock.calls[2]![3]?.map(schema => schema.name)).toContain('bash');
+  });
+});
+
 describe('Runner persistence and force-tool characterization', () => {
   const createTestRunner = () => createRunner({
     apiBaseUrl: 'mock',
@@ -272,7 +342,8 @@ describe('Runner persistence and force-tool characterization', () => {
       entries: initialEntries,
       system: 'system',
       tools: [continuationTool],
-      maxSteps: 2,
+      budget: roundsBudget(2),
+      deadlineAtMs: Date.now() + 60_000,
       onStepComplete,
       checkInterrupt,
       log: logger,
@@ -331,7 +402,8 @@ describe('Runner persistence and force-tool characterization', () => {
       entries: initialEntries,
       system: 'system',
       tools: [rejectedTool, sendTool],
-      maxSteps: 1,
+      budget: roundsBudget(1),
+      deadlineAtMs: Date.now() + 60_000,
       forceToolChoice: { name: 'send_message' },
       onStepComplete,
       checkInterrupt,
@@ -401,7 +473,8 @@ describe('Runner persistence and force-tool characterization', () => {
       entries: initialEntries,
       system: 'system',
       tools: [rejectedTool, sendTool],
-      maxSteps: 1,
+      budget: roundsBudget(1),
+      deadlineAtMs: Date.now() + 60_000,
       forceToolChoice: { name: 'send_message' },
       onStepComplete,
       checkInterrupt: () => false,

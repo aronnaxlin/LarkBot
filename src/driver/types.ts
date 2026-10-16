@@ -41,6 +41,28 @@ export interface DebounceConfig {
   maxDelayMs: number;
 }
 
+// Primary tool-loop budget. Counts accumulate across an interruption chain
+// (TRs joined by requiresFollowUp); the deadline is per wake-up execution.
+export interface TurnBudget {
+  // Regular model steps (all tools visible) before the tool-less wrap-up.
+  maxToolRounds: number;
+  // Work-tool calls; participation tools (send_message/react/end_turn) are exempt.
+  maxToolCalls: number;
+  // Combined send_message/react attempts across the chain; end_turn is exempt.
+  maxParticipationCalls?: number;
+  // Measured from executeWakeup entry, probe included.
+  deadlineMs: number;
+  // A model call starts only with at least this much deadline left; its HTTP
+  // timeout is the remaining time, capped by the endpoint's timeoutSec.
+  minModelCallMs: number;
+}
+
+export interface TurnBudgetUsage {
+  toolRounds: number;
+  toolCalls: number;
+  participationCalls?: number;
+}
+
 export interface CompactionSessionMeta {
   oldCursorMs: number;
   newCursorMs: number;

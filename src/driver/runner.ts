@@ -2,7 +2,8 @@ import type { Logger } from '@guiiai/logg';
 
 import type { CahciuaTool } from './tools';
 import { executeToolCall, extractToolCalls, toToolSchema } from './tools';
-import { runTurnLoop, type ExecutedStepResult, type ModelStepResult } from './turn-loop';
+import { PARTICIPATION_TOOL_NAMES, runTurnLoop, type ExecutedStepResult, type ModelStepOptions, type ModelStepResult } from './turn-loop';
+import type { TurnBudget, TurnBudgetUsage } from './types';
 import { callLlm, type ForceToolChoice, type LlmCallConfig, type LlmCallUsage } from '../llm/call';
 import type { ConversationEntry, ToolResult } from '../unified-api/types';
 
@@ -16,18 +17,24 @@ interface CallModelStepParams {
   step: number;
   maxImagesAllowed?: number;
   forceToolChoice?: ForceToolChoice;
+  options: ModelStepOptions;
   log: Logger;
 }
 
 interface ExecuteToolStepParams {
   modelStep: ModelStepResult;
   tools: CahciuaTool[];
+  remainingToolCalls: number;
+  remainingParticipationCalls: number;
+  deadlineAtMs: number;
   log: Logger;
 }
 
-export interface StepLoopParams extends Omit<CallModelStepParams, 'entries' | 'step'> {
+export interface StepLoopParams extends Omit<CallModelStepParams, 'entries' | 'step' | 'options'> {
   entries: ConversationEntry[];
-  maxSteps: number;
+  budget: TurnBudget;
+  budgetUsed?: TurnBudgetUsage;
+  deadlineAtMs: number;
   onStepComplete: (
     stepEntries: ConversationEntry[],
     usage: LlmCallUsage,
@@ -37,6 +44,13 @@ export interface StepLoopParams extends Omit<CallModelStepParams, 'entries' | 's
 }
 
 const MAX_FORCE_TOOL_RETRIES = 3;
+
+const budgetSkipped = (callId: string): ToolResult => ({
+  kind: 'toolResult',
+  callId,
+  payload: JSON.stringify({ error: 'Tool budget for this turn is exhausted; this call was not executed.' }),
+  requiresFollowUp: true,
+});
 
 const addUsage = (left: LlmCallUsage, right: LlmCallUsage): LlmCallUsage => ({
   inputTokens: left.inputTokens + right.inputTokens,
@@ -48,20 +62,32 @@ const addUsage = (left: LlmCallUsage, right: LlmCallUsage): LlmCallUsage => ({
 export const createRunner = (config: RunnerConfig) => {
   const callModelStep = async (params: CallModelStepParams): Promise<ModelStepResult> => {
     const stepRequestedAt = Date.now();
-    const toolSchemas = params.tools.map(toToolSchema);
+    const tools = params.options.wrapUp
+      ? params.tools.filter(tool => PARTICIPATION_TOOL_NAMES.has(tool.name))
+      : params.tools;
+    const toolSchemas = tools.map(toToolSchema);
 
-    const invokeModel = () => callLlm(
-      { ...config, forceToolChoice: params.forceToolChoice },
-      params.entries,
-      params.system,
-      toolSchemas,
-      {
-        log: params.log,
-        label: `step:${params.step}`,
-        dumpId: params.chatId,
-        maxImagesAllowed: params.maxImagesAllowed,
-      },
-    );
+    // Model calls have no side effects, so aborting them at the deadline is
+    // safe. Each attempt, including forced-choice retries, gets the remainder.
+    const invokeModel = () => {
+      const remainingSec = (params.options.deadlineAtMs - Date.now()) / 1000;
+      if (remainingSec <= 0)
+        throw new Error(`Turn deadline reached before model step ${params.step}`);
+      // Transports treat a falsy timeoutSec as "no timeout".
+      const timeoutSec = config.timeoutSec ? Math.min(config.timeoutSec, remainingSec) : remainingSec;
+      return callLlm(
+        { ...config, timeoutSec, forceToolChoice: params.forceToolChoice },
+        params.entries,
+        params.system,
+        toolSchemas,
+        {
+          log: params.log,
+          label: `step:${params.step}`,
+          dumpId: params.chatId,
+          maxImagesAllowed: params.maxImagesAllowed,
+        },
+      );
+    };
 
     let result = await invokeModel();
     let usage = { ...result.usage };
@@ -103,7 +129,27 @@ export const createRunner = (config: RunnerConfig) => {
   const executeToolStep = async (params: ExecuteToolStepParams): Promise<ExecutedStepResult> => {
     const toolCalls = extractToolCalls(params.modelStep.modelEntries);
     const toolResults: ToolResult[] = [];
+    let remainingToolCalls = params.remainingToolCalls;
+    let remainingParticipationCalls = params.remainingParticipationCalls;
     for (const toolCall of toolCalls) {
+      // Do not start another side effect after expiry. Already-running calls
+      // finish and all results are persisted together; end_turn is harmless.
+      const participating = toolCall.name === 'send_message' || toolCall.name === 'react';
+      if (toolCall.name !== 'end_turn' && (Date.now() >= params.deadlineAtMs || (participating && remainingParticipationCalls <= 0))) {
+        toolResults.push(budgetSkipped(toolCall.callId));
+        continue;
+      }
+      if (participating) remainingParticipationCalls--;
+      // Every call needs a result for the provider; over-budget work calls get
+      // an explicit not-executed result instead of running.
+      if (!PARTICIPATION_TOOL_NAMES.has(toolCall.name)) {
+        if (remainingToolCalls <= 0) {
+          params.log.withFields({ tool: toolCall.name }).log('Tool budget exhausted; skipping call');
+          toolResults.push(budgetSkipped(toolCall.callId));
+          continue;
+        }
+        remainingToolCalls--;
+      }
       toolResults.push(await executeToolCall(
         toolCall.callId,
         toolCall.name,
@@ -124,19 +170,23 @@ export const createRunner = (config: RunnerConfig) => {
   const runStepLoop = (params: StepLoopParams): Promise<void> => runTurnLoop(
     params,
     {
-      callModelStep: (entries, step) => callModelStep({
+      callModelStep: (entries, step, options) => callModelStep({
         chatId: params.chatId,
         entries,
         system: params.system,
         tools: params.tools,
         step,
+        options,
         maxImagesAllowed: params.maxImagesAllowed,
         forceToolChoice: params.forceToolChoice,
         log: params.log,
       }),
-      executeToolStep: modelStep => executeToolStep({
+      executeToolStep: (modelStep, options) => executeToolStep({
         modelStep,
         tools: params.tools,
+        remainingToolCalls: options.remainingToolCalls,
+        remainingParticipationCalls: options.remainingParticipationCalls,
+        deadlineAtMs: options.deadlineAtMs,
         log: params.log,
       }),
     },

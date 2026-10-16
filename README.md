@@ -1,7 +1,7 @@
 # LarkBot
 
 > [!WARNING]
-> Work in progress. LarkBot is under active development and is not ready for use. The current codebase still runs the upstream Telegram implementation; Feishu/Lark support and the changes described below are planned, not yet implemented.
+> Work in progress. LarkBot is under active development and is not ready for use. A first Feishu/Lark adapter and bounded, optional participation are implemented and offline-tested, but have not been validated against a live Feishu application. This is not a production-ready release.
 
 LarkBot is a Feishu/Lark-first, LLM-driven group-chat bot for a small private community. It is meant to hang out in a group, with its own personality and memories—not to serve as a personal assistant or a productivity tool.
 
@@ -24,7 +24,12 @@ Menci has granted permission for this private, non-commercial adaptation. That p
 
 ## Development
 
-The inherited implementation uses TypeScript, Node.js >=22, pnpm, and SQLite. Existing architecture and contributor documentation describe the current Telegram implementation, not completed LarkBot features:
+The inherited implementation uses TypeScript, Node.js >=22, pnpm, and SQLite. See the implementation notes for the current scope, configuration, and remaining limitations. Browser isolation, per-person long-term memory, and maintainer authorization are still planned; the inherited Bash tool is not automatically sandboxed:
+
+- [Feishu implementation notes](docs/feishu-implementation.md)
+- [Integration status](docs/integration-status.md)
+
+Architecture and contributor documentation:
 
 - [Agent guide](AGENTS.md)
 - [Context pipeline design](docs/dcp-design.md)

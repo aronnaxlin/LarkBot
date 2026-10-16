@@ -62,7 +62,7 @@ const createFixture = () => {
       writeFileSizeLimit: 1024 * 1024,
       readFileSizeLimit: 1024 * 1024,
     },
-    sendMessage: vi.fn(async () => ({ messageId: 77 })),
+    sendMessage: vi.fn(async () => ({ messageId: '77' })),
     banSpammer: async () => ({ status: 'rejected' as const, reason: 'unknown_message' as const }),
     setMessageReaction: vi.fn(async () => {}),
     loadMessageAttachments: vi.fn(() => [{ type: 'photo' as const }]),
@@ -101,7 +101,7 @@ describe('createPrimaryTools', () => {
     deps.chatConfig.tools.banSpammer = true;
     deps.banSpammer = vi.fn(async () => ({ status: 'rejected' as const, reason: 'message_limit' as const }));
     const result = await findTool(createPrimaryTools(deps), 'ban_spammer').execute({ message_id: '42', reason: 'unsolicited promotion' });
-    expect(deps.banSpammer).toHaveBeenCalledExactlyOnceWith('chat-1', 42);
+    expect(deps.banSpammer).toHaveBeenCalledExactlyOnceWith('chat-1', '42');
     expect(result.requiresFollowUp).toBe(true);
   });
 
@@ -156,7 +156,7 @@ describe('createPrimaryTools', () => {
 
   it('keeps send_message semantics and checks Telegram message ids before I/O', async () => {
     const { deps, logger } = createFixture();
-    vi.mocked(deps.messageExists).mockImplementation((_chatId, messageId) => messageId === 42);
+    vi.mocked(deps.messageExists).mockImplementation((_chatId, messageId) => messageId === '42');
     const tools = createPrimaryTools(deps);
     const sendMessage = findTool(tools, 'send_message');
     const react = findTool(tools, 'react');
@@ -189,8 +189,8 @@ describe('createPrimaryTools', () => {
       { message_id: '42', emoji: '\u{1F44D}' },
     );
 
-    expect(deps.sendMessage).toHaveBeenCalledWith('chat-1', text, 42, attachments);
-    expect(deps.setMessageReaction).toHaveBeenCalledWith('chat-1', 42, '\u{1F44D}');
+    expect(deps.sendMessage).toHaveBeenCalledWith('chat-1', text, '42', attachments);
+    expect(deps.setMessageReaction).toHaveBeenCalledWith('chat-1', '42', '\u{1F44D}');
     expect(logger.withFields).toHaveBeenCalledWith({
       chatId: 'chat-1',
       text: `${'x'.repeat(100)}...`,
@@ -229,25 +229,76 @@ describe('createPrimaryTools', () => {
 
   it('shares the Telegram attachment downloader with download_file', async () => {
     const { deps } = createFixture();
-    vi.mocked(deps.downloadMessageMedia).mockResolvedValue(Buffer.from('file'));
+    vi.mocked(deps.downloadMessageMedia!).mockResolvedValue(Buffer.from('file'));
     const result = await findTool(createPrimaryTools(deps), 'download_file').execute({
       file_id: '123:0',
       path: 'downloaded.bin',
     });
 
-    expect(deps.loadMessageAttachments).toHaveBeenCalledWith('chat-1', 123);
-    expect(deps.downloadMessageMedia).toHaveBeenCalledWith('chat-1', 123);
+    expect(deps.loadMessageAttachments).toHaveBeenCalledWith('chat-1', '123');
+    expect(deps.downloadMessageMedia).toHaveBeenCalledWith('chat-1', '123');
     expect(result).toEqual({
       content: JSON.stringify({ ok: true, path: 'downloaded.bin', size: 4 }),
       requiresFollowUp: true,
     });
   });
 
+  it('passes opaque string message ids through attachment file ids', async () => {
+    const { deps } = createFixture();
+    vi.mocked(deps.downloadMessageMedia!).mockResolvedValue(Buffer.from('file'));
+    await findTool(createPrimaryTools(deps), 'download_file').execute({
+      file_id: 'om_synthetic:0',
+      path: 'downloaded.bin',
+    });
+    expect(deps.loadMessageAttachments).toHaveBeenCalledWith('chat-1', 'om_synthetic');
+    expect(deps.downloadMessageMedia).toHaveBeenCalledWith('chat-1', 'om_synthetic');
+  });
+
+  it('hides attachment and moderation tools when the platform lacks those capabilities', async () => {
+    const { deps } = createFixture();
+    deps.chatConfig.tools.banSpammer = true;
+    deps.loadMessageAttachments = undefined;
+    deps.downloadMessageMedia = undefined;
+    deps.banSpammer = undefined;
+    const tools = createPrimaryTools(deps);
+
+    expect(tools.map(tool => tool.name)).toEqual([
+      'send_message',
+      'react',
+      'bash',
+      'read_image',
+      'kill_task',
+      'read_task_output',
+      'read_old_messages',
+      'sleep',
+      'end_turn',
+    ]);
+    const sendMessage = findTool(tools, 'send_message');
+    expect(JSON.stringify(sendMessage.parameters)).not.toContain('attachments');
+    await expect(sendMessage.execute({ text: 'hi', attachments: [{ type: 'photo', path: 'x.png' }] }))
+      .resolves.toMatchObject({ requiresFollowUp: true });
+    expect(deps.sendMessage).not.toHaveBeenCalled();
+
+    await expect(sendMessage.execute({ text: 'hi', reply_to: 'om_synthetic' })).resolves.toEqual({
+      content: JSON.stringify({ ok: true, message_id: '77' }),
+      requiresFollowUp: false,
+    });
+    expect(deps.sendMessage).toHaveBeenCalledWith('chat-1', 'hi', 'om_synthetic', undefined);
+    await expect(findTool(tools, 'read_image').execute({ file_id: 'om_synthetic:0' }))
+      .rejects.toThrow('not available on this platform');
+  });
+
+  it('rejects a half-declared attachment capability', () => {
+    const { deps } = createFixture();
+    deps.downloadMessageMedia = undefined;
+    expect(() => createPrimaryTools(deps)).toThrow('requires both');
+  });
+
   it('uses the configured model through the media description call for read_image', async () => {
     const { deps, endpoint } = createFixture();
     const image = await createTinyPng();
     deps.chatConfig.imageToText = { enabled: true, model: 'vision' };
-    vi.mocked(deps.downloadMessageMedia).mockResolvedValue(image);
+    vi.mocked(deps.downloadMessageMedia!).mockResolvedValue(image);
     vi.mocked(renderImageToTextSystemPrompt).mockResolvedValue('image system');
     vi.mocked(callDescriptionLlm).mockResolvedValue({ text: '  described image  ', outputTokens: 5 });
 

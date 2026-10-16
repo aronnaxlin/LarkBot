@@ -1,5 +1,3 @@
-export { createTelegramEventSink } from './event-sink';
-export type { TelegramEventSink } from './event-sink';
 export { createTelegramLiveHandlers } from './live-handlers';
 export type { TelegramLiveHandlers } from './live-handlers';
 export { createTelegramClients, createTelegramManager } from './manager';
@@ -8,3 +6,4 @@ export { createTelegramPostStartupTasks } from './post-startup';
 export type { TelegramPostStartupTasks } from './post-startup';
 export { createTelegramDriverHooks } from './driver-hooks';
 export type { TelegramDriverHooks } from './driver-hooks';
+export { createTelegramDriverPlatform } from './driver-platform';

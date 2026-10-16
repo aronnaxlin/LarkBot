@@ -10,6 +10,7 @@ vi.mock('../llm/call', async importOriginal => {
 });
 
 import { createDriver } from './index';
+import { DEFAULT_TURN_BUDGET } from './turn-loop';
 import type { TurnResponseV2 } from './types';
 import type { ResolvedChatConfig } from '../config/config';
 import { callLlm } from '../llm/call';
@@ -24,6 +25,7 @@ const mockCallLlm = vi.mocked(callLlm);
 const makeChatConfig = (): ResolvedChatConfig => ({
   primary: {
     model: { apiBaseUrl: 'mock', apiKey: 'k', model: 'mock-primary', apiFormat: 'openai-chat' },
+    turnBudget: DEFAULT_TURN_BUDGET,
   },
   systemFiles: [],
   sendTypingAction: false,
@@ -147,10 +149,11 @@ describe('probe vs primary view of bot\'s own messages', () => {
     const driver = createDriver(
       { chatIds: ['-100123'], resolveChatConfig: () => makeChatConfig() },
       {
+        name: 'telegram',
         loadTurnResponses: async () => [...trs, ...persistedTRs],
         persistTurnResponse: async (_, tr) => { persistedTRs.push(tr); },
         persistProbeResponse: async () => {},
-        sendMessage: async () => ({ messageId: 999, date: 0 }),
+        sendMessage: async () => ({ messageId: '999' }),
         banSpammer: async () => ({ status: 'rejected' as const, reason: 'unknown_message' as const }),
         setMessageReaction: async () => {},
         sendTypingAction: async () => {},
@@ -217,8 +220,8 @@ describe('probe vs primary view of bot\'s own messages', () => {
     expect(primaryAssistantToolCalls).toContain('bash');
 
     // Primary's late-binding embeds the probe's reason as advisory.
-    expect(primaryUserText).toContain('evaluator\'s notes');
-    expect(primaryUserText).toContain('advisory only');
+    expect(primaryUserText).toContain('The note is only a hint');
+    expect(primaryUserText).toContain('staying silent or only reacting is still allowed');
     expect(primaryUserText).toContain('Plausible: (a) react 👀');
 
     // Probe sees no real assistant tool calls in its context — all TRs are
@@ -229,14 +232,10 @@ describe('probe vs primary view of bot\'s own messages', () => {
     driver.stop();
   });
 
-  it('runs a forced send_message fallback when primary ends loop with end_turn but no send_message', async () => {
+  it('lets an activated primary end the turn silently with end_turn and runs no forced send', async () => {
     mockCallLlm.mockReset();
 
-    // Track which primary call this is — first call returns end_turn (no
-    // send_message), fallback call must be invoked with forceToolChoice
-    // pointing to send_message.
     let primaryCallCount = 0;
-    let fallbackCall: typeof mockCallLlm.mock.calls[0] | undefined;
 
     mockCallLlm.mockImplementation(async (config, _entries) => {
       if (config.model === 'mock-probe') {
@@ -251,27 +250,11 @@ describe('probe vs primary view of bot\'s own messages', () => {
           usage: { inputTokens: 10, outputTokens: 5, cacheReadTokens: 0, cacheWriteTokens: 0 },
         };
       }
-      // primary
       primaryCallCount++;
-      if (primaryCallCount === 1) {
-        // First primary call: end_turn alone (no send_message).
-        return {
-          entries: [{
-            kind: 'message', role: 'assistant', reasoning: undefined,
-            parts: [{ kind: 'toolCall', callId: 'pr1', name: 'end_turn', args: '{}' }],
-          }],
-          usage: { inputTokens: 20, outputTokens: 10, cacheReadTokens: 0, cacheWriteTokens: 0 },
-        };
-      }
-      // Second primary call (the fallback): send_message.
-      fallbackCall = mockCallLlm.mock.calls[mockCallLlm.mock.calls.length - 1];
       return {
         entries: [{
           kind: 'message', role: 'assistant', reasoning: undefined,
-          parts: [{
-            kind: 'toolCall', callId: 'pr2', name: 'send_message',
-            args: JSON.stringify({ text: 'forced fallback message' }),
-          }],
+          parts: [{ kind: 'toolCall', callId: `pr${primaryCallCount}`, name: 'end_turn', args: '{}' }],
         }],
         usage: { inputTokens: 20, outputTokens: 10, cacheReadTokens: 0, cacheWriteTokens: 0 },
       };
@@ -283,10 +266,11 @@ describe('probe vs primary view of bot\'s own messages', () => {
     const driver = createDriver(
       { chatIds: ['-100124'], resolveChatConfig: () => makeChatConfig() },
       {
+        name: 'telegram',
         loadTurnResponses: async () => [...persistedTRs],
         persistTurnResponse: async (_, tr) => { persistedTRs.push(tr); },
         persistProbeResponse: async () => {},
-        sendMessage: async (_chatId, text) => { sendMessageCalls.push({ text }); return { messageId: 999, date: 0 }; },
+        sendMessage: async (_chatId, text) => { sendMessageCalls.push({ text }); return { messageId: '999' }; },
         banSpammer: async () => ({ status: 'rejected' as const, reason: 'unknown_message' as const }),
         setMessageReaction: async () => {},
         sendTypingAction: async () => {},
@@ -314,15 +298,15 @@ describe('probe vs primary view of bot\'s own messages', () => {
 
     driver.handleEvent('-100124', buildRC());
 
-    // 1 probe + 1 primary (end_turn) + 1 fallback (send_message) = 3
-    await vi.waitFor(() => expect(mockCallLlm).toHaveBeenCalledTimes(3), { timeout: 1000, interval: 10 });
+    await vi.waitFor(() => expect(persistedTRs).toHaveLength(1), { timeout: 1000, interval: 10 });
+    // Give a would-be fallback the chance to run before asserting it did not.
+    await new Promise<void>(resolve => setTimeout(resolve, 50));
 
-    expect(primaryCallCount).toBe(2);
-    expect(fallbackCall).toBeDefined();
-    // Fallback call's config carries the specific tool_choice constraint.
-    expect(fallbackCall![0]!.forceToolChoice).toEqual({ name: 'send_message' });
-    // Actual TG send happened once (the fallback message).
-    expect(sendMessageCalls).toEqual([{ text: 'forced fallback message' }]);
+    // 1 probe + 1 primary (end_turn); no follow-up fallback step.
+    expect(mockCallLlm).toHaveBeenCalledTimes(2);
+    expect(primaryCallCount).toBe(1);
+    expect(mockCallLlm.mock.calls.map(call => call[0]!.forceToolChoice)).toEqual([{ name: 'decide' }, 'any']);
+    expect(sendMessageCalls).toEqual([]);
 
     driver.stop();
   });

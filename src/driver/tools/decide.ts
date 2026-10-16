@@ -22,7 +22,8 @@ export const createDecideTool = (): CahciuaTool => createTool({
         type: 'string',
         enum: ['send_message', 'no_action'],
         description:
-          '`send_message`: You predict that the chatbot will immediately perform new actions or send new messages to the chatroom.\n'
+          '`send_message`: You predict that the chatbot will immediately perform new actions or send new messages to the chatroom. '
+          + 'This only wakes the chatbot; it may still decide to react only or stay silent.\n'
           + '`no_action`: You predict that the chatbot will keep silent (no message, no reaction, no tool call) at this turn.',
       },
       reason: {

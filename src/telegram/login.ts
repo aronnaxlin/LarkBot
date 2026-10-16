@@ -7,13 +7,14 @@ import * as tdl from 'tdl';
 
 import { resolveTdjson } from './tdjson';
 import { resolveUserbotDataDir } from './tdlib-paths';
-import { loadConfig } from '../config/config';
+import { loadConfig, requireTelegramConfig } from '../config/config';
 
 const main = async () => {
   initLogger(LogLevel.Log, Format.Pretty);
   const log = useGlobalLogger('login');
 
   const config = loadConfig();
+  const telegram = requireTelegramConfig(config);
 
   tdl.configure({ tdjson: resolveTdjson() });
 
@@ -22,8 +23,8 @@ const main = async () => {
   mkdirSync(`${dataDir}/files`, { recursive: true });
 
   const client = tdl.createClient({
-    apiId: config.telegram.apiId,
-    apiHash: config.telegram.apiHash,
+    apiId: telegram.apiId,
+    apiHash: telegram.apiHash,
     databaseDirectory: `${dataDir}/db`,
     filesDirectory: `${dataDir}/files`,
     tdlibParameters: {

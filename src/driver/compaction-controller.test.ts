@@ -6,6 +6,7 @@ vi.mock('./compaction', () => ({ runCompaction: vi.fn() }));
 
 import { runCompaction } from './compaction';
 import { createCompactionController } from './compaction-controller';
+import { DEFAULT_TURN_BUDGET } from './turn-loop';
 import type { CompactionSessionMeta } from './types';
 import type { RenderedContext } from '../rendering/types';
 
@@ -47,6 +48,7 @@ describe('createCompactionController', () => {
       chatConfig: {
         primary: {
           model: { apiBaseUrl: 'mock', apiKey: 'key', model: 'model', apiFormat: 'openai-chat' },
+          turnBudget: DEFAULT_TURN_BUDGET,
         },
         systemFiles: [],
         sendTypingAction: false,

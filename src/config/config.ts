@@ -5,7 +5,8 @@ import { merge } from 'es-toolkit';
 import * as v from 'valibot';
 import { parse as parseYaml } from 'yaml';
 
-import type { CompactionConfig, DebounceConfig } from '../driver/types';
+import { DEFAULT_TURN_BUDGET } from '../driver/turn-budget';
+import type { CompactionConfig, DebounceConfig, TurnBudget } from '../driver/types';
 import type { WebFetchConfig } from '../driver/web-fetch/types';
 import type { WebSearchConfig } from '../driver/web-search/types';
 import type { LlmEndpoint } from '../llm/types';
@@ -34,9 +35,20 @@ const RuntimeSchema = v.object({
 
 // --- Chat-level config schemas ---
 
+// Partial override of DEFAULT_TURN_BUDGET. The cross-field rule
+// deadlineMs > minModelCallMs is checked after merging with the defaults.
+const TurnBudgetOverrideSchema = v.partial(v.object({
+  maxToolRounds: v.pipe(v.number(), v.integer(), v.minValue(0)),
+  maxToolCalls: v.pipe(v.number(), v.integer(), v.minValue(0)),
+  maxParticipationCalls: v.pipe(v.number(), v.integer(), v.minValue(0)),
+  deadlineMs: v.pipe(v.number(), v.integer(), v.minValue(1)),
+  minModelCallMs: v.pipe(v.number(), v.integer(), v.minValue(1)),
+}));
+
 const ChatConfigSchema = v.object({
   primary: v.optional(v.object({
     model: v.optional(v.string(), 'primary'),
+    turnBudget: v.optional(TurnBudgetOverrideSchema, {}),
   }), {}),
   systemFiles: v.optional(v.array(v.string()), []),
   sendTypingAction: v.optional(v.boolean(), true),
@@ -93,6 +105,7 @@ const ChatConfigSchema = v.object({
 const ChatOverrideSchema = v.optional(v.partial(v.object({
   primary: v.partial(v.object({
     model: v.pipe(v.string(), v.minLength(1)),
+    turnBudget: TurnBudgetOverrideSchema,
   })),
   systemFiles: v.array(v.string()),
   sendTypingAction: v.boolean(),
@@ -152,7 +165,10 @@ const BackgroundTasksSchema = v.optional(v.object({
 
 const ConfigSchema = v.object({
   models: v.record(v.string(), v.object(llmEndpointEntries)),
-  telegram: v.object({
+  /** Chat platform this process connects to. Exactly one platform runs per process. */
+  platform: v.optional(v.picklist(['telegram', 'feishu']), 'telegram'),
+  /** Required when platform is "telegram". */
+  telegram: v.optional(v.object({
     botToken: v.string(),
     apiId: v.number(),
     apiHash: v.string(),
@@ -162,7 +178,12 @@ const ConfigSchema = v.object({
     botDataDir: v.optional(v.string()),
     /** Override the default tdlib state directory for the userbot client (defaults to data/tdlib-userbot). */
     userbotDataDir: v.optional(v.string()),
-  }),
+  })),
+  /** Used when platform is "feishu". Credentials never live in this YAML file. */
+  feishu: v.optional(v.object({
+    /** Dotenv-style file with FEISHU_APP_ID, FEISHU_APP_SECRET and optional FEISHU_DOMAIN. */
+    credentialsFile: v.optional(v.string(), '.config/feishu_cn.env'),
+  }), {}),
   database: v.optional(v.object({
     path: v.optional(v.string(), './data/cahciua.db'),
   }), {}),
@@ -172,13 +193,14 @@ const ConfigSchema = v.object({
 });
 
 export type Config = v.InferOutput<typeof ConfigSchema>;
+export type TelegramConfig = NonNullable<Config['telegram']>;
 export type ChatConfig = v.InferOutput<typeof ChatConfigSchema>;
 
 export type RuntimeConfig = Config['runtime'];
 export type BackgroundTasksConfig = Config['backgroundTasks'];
 
 export interface ResolvedChatConfig {
-  primary: { model: LlmEndpoint };
+  primary: { model: LlmEndpoint; turnBudget: TurnBudget };
   systemFiles: { filename: string; content: string }[];
   sendTypingAction: boolean;
   blockedUserIds: string[];
@@ -198,10 +220,48 @@ export interface ResolvedChatConfig {
 
 const CONFIG_PATH = process.env.CONFIG_PATH ?? 'config.yaml';
 
+const mergeChatConfig = (config: Config, chatId: string): ChatConfig => {
+  const override = config.chats[chatId];
+  if (!override) throw new Error(`Unknown chat "${chatId}" — not found in chats registry`);
+  return merge(structuredClone(config.chats.default), override);
+};
+
+const resolveTurnBudget = (chatId: string, merged: ChatConfig): TurnBudget => {
+  const budget = { ...DEFAULT_TURN_BUDGET, ...merged.primary.turnBudget };
+  // An interrupted continuation skips probe and must be able to start at least
+  // one model step; otherwise the open chain could never close.
+  if (budget.deadlineMs <= budget.minModelCallMs)
+    throw new Error(`Chat ${chatId}: primary.turnBudget.deadlineMs (${budget.deadlineMs}) must be greater than minModelCallMs (${budget.minModelCallMs})`);
+  return budget;
+};
+
+// Cross-field rules the schema cannot express.
+const validateConfig = (config: Config): void => {
+  for (const chatId of getChatIds(config)) resolveTurnBudget(chatId, mergeChatConfig(config, chatId));
+
+  if (config.platform === 'telegram' && !config.telegram)
+    throw new Error('Config: the "telegram" section is required when platform is "telegram"');
+  if (config.platform === 'feishu') {
+    for (const chatId of getChatIds(config)) {
+      const merged = mergeChatConfig(config, chatId);
+      // ban_spammer is a Telegram moderation backend; Feishu has no equivalent yet.
+      if (merged.tools.banSpammer)
+        throw new Error(`Chat ${chatId}: tools.banSpammer is not supported when platform is "feishu"`);
+    }
+  }
+};
+
 export const loadConfig = (): Config => {
   const raw = readFileSync(CONFIG_PATH, 'utf-8');
   const parsed = parseYaml(raw);
-  return v.parse(ConfigSchema, parsed);
+  const config = v.parse(ConfigSchema, parsed);
+  validateConfig(config);
+  return config;
+};
+
+export const requireTelegramConfig = (config: Config): TelegramConfig => {
+  if (!config.telegram) throw new Error('Telegram configuration is unavailable');
+  return config.telegram;
 };
 
 export const resolveModel = (config: Config, name: string): LlmEndpoint => {
@@ -216,9 +276,7 @@ export const getChatIds = (config: Config): string[] =>
 
 /** Deep-merge default chat config with per-chat overrides and resolve model names. */
 export const resolveChatConfig = (config: Config, chatId: string): ResolvedChatConfig => {
-  const override = config.chats[chatId];
-  if (!override) throw new Error(`Unknown chat "${chatId}" — not found in chats registry`);
-  const merged: ChatConfig = merge(structuredClone(config.chats.default), override);
+  const merged = mergeChatConfig(config, chatId);
 
   const primaryModel = resolveModel(config, merged.primary.model);
   const web = merged.tools.web;
@@ -243,7 +301,7 @@ export const resolveChatConfig = (config: Config, chatId: string): ResolvedChatC
   }
 
   return {
-    primary: { model: primaryModel },
+    primary: { model: primaryModel, turnBudget: resolveTurnBudget(chatId, merged) },
     systemFiles: merged.systemFiles.map(path => ({
       filename: basename(path),
       content: readFileSync(path, 'utf-8').trim(),

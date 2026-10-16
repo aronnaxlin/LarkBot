@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest';
 
-import { composeContext, findWorkingWindowCursor, loopEndedWithoutSendMessage } from './context';
+import { composeContext, findWorkingWindowCursor } from './context';
 import type { TurnResponseV2 } from './types';
 import type { RenderedContext } from '../rendering/types';
 import type { ConversationEntry, InputPart, ToolResult } from '../unified-api/types';
@@ -192,128 +192,6 @@ describe('composeContext — misc', () => {
       && first.parts[0]!.kind === 'text' ? first.parts[0]!.text : '';
     expect(firstText).toContain('Conversation summary');
     expect(firstText).toContain('earlier stuff');
-  });
-});
-
-describe('loopEndedWithoutSendMessage', () => {
-  // TR helpers — fwup state of the toolResult is what defines loop membership.
-  // sendMsg / end_turn → fwup=false (clean exit / loop boundary).
-  // react / bash → fwup=true (continuation; runner planned a next step).
-  const sendMsgTr = (ts: number): TurnResponseV2 => tr(ts, [
-    { kind: 'message', role: 'assistant', parts: [{ kind: 'toolCall', callId: `c${ts}`, name: 'send_message', args: '{"text":"hi"}' }], reasoning: undefined },
-    { kind: 'toolResult', callId: `c${ts}`, payload: '{"ok":true}', requiresFollowUp: false },
-  ]);
-  const failedSendMsgTr = (ts: number): TurnResponseV2 => tr(ts, [
-    { kind: 'message', role: 'assistant', parts: [{ kind: 'toolCall', callId: `c${ts}`, name: 'send_message', args: '{"text":"hi"}' }], reasoning: undefined },
-    { kind: 'toolResult', callId: `c${ts}`, payload: '{"error":"failed"}', requiresFollowUp: true },
-  ]);
-  const endTurnTr = (ts: number): TurnResponseV2 => tr(ts, [
-    { kind: 'message', role: 'assistant', parts: [{ kind: 'toolCall', callId: `c${ts}`, name: 'end_turn', args: '{}' }], reasoning: undefined },
-    { kind: 'toolResult', callId: `c${ts}`, payload: '{"ok":true}', requiresFollowUp: false },
-  ]);
-  const reactTr = (ts: number): TurnResponseV2 => tr(ts, [
-    { kind: 'message', role: 'assistant', parts: [{ kind: 'toolCall', callId: `c${ts}`, name: 'react', args: '{"emoji":"👍","message_id":"1"}' }], reasoning: undefined },
-    { kind: 'toolResult', callId: `c${ts}`, payload: '{"ok":true}', requiresFollowUp: true },
-  ]);
-  const bashTr = (ts: number): TurnResponseV2 => tr(ts, [
-    { kind: 'message', role: 'assistant', parts: [{ kind: 'toolCall', callId: `c${ts}`, name: 'bash', args: '{"command":"ls","timeout_seconds":5}' }], reasoning: undefined },
-    { kind: 'toolResult', callId: `c${ts}`, payload: '{"ok":true}', requiresFollowUp: true },
-  ]);
-  // Step that emits send_message + a fwup=true tool in parallel (so the runner
-  // continues to the next step). Models the user's t+80 hypothetical: bot
-  // speaks AND queues another action in the same step.
-  const sendMsgPlusBashTr = (ts: number): TurnResponseV2 => tr(ts, [
-    {
-      kind: 'message', role: 'assistant', parts: [
-        { kind: 'toolCall', callId: `c${ts}a`, name: 'send_message', args: '{"text":"hi"}' },
-        { kind: 'toolCall', callId: `c${ts}b`, name: 'bash', args: '{"command":"ls","timeout_seconds":5}' },
-      ], reasoning: undefined,
-    },
-    { kind: 'toolResult', callId: `c${ts}a`, payload: '{"ok":true}', requiresFollowUp: false },
-    { kind: 'toolResult', callId: `c${ts}b`, payload: '{"ok":true}', requiresFollowUp: true },
-  ]);
-
-  it('returns false when latest TR is a clean send_message (no fallback for normal exit)', () => {
-    // Gate: cycle exited via send_message, not end_turn.
-    const trs = [endTurnTr(100), sendMsgTr(110), sendMsgTr(200)];
-    expect(loopEndedWithoutSendMessage(trs)).toBe(false);
-  });
-
-  it('returns false when latest TR is mid-loop (interrupted bash/react/etc.)', () => {
-    // Interrupt path: runner broke mid-loop. Latest TR has fwup=true tool.
-    // Gate skips fallback — the next cycle will pick up the new messages.
-    expect(loopEndedWithoutSendMessage([endTurnTr(100), bashTr(200)])).toBe(false);
-    expect(loopEndedWithoutSendMessage([endTurnTr(100), reactTr(200)])).toBe(false);
-  });
-
-  it('returns false when the current cycle includes send_message (clean exit)', () => {
-    // Multi-step: send_message → react → end_turn (all in one runStepLoop).
-    // The send_message + bash step has fwup=true (bash) → walk-back continues
-    // and finds the send_message. No fallback.
-    const trs = [endTurnTr(100), sendMsgPlusBashTr(200), reactTr(210), endTurnTr(220)];
-    expect(loopEndedWithoutSendMessage(trs)).toBe(false);
-  });
-
-  it('returns true when current cycle ends with end_turn and has no send_message', () => {
-    // Bot acted (react) but never spoke. Fallback fires.
-    const trs = [endTurnTr(100), reactTr(200), endTurnTr(210)];
-    expect(loopEndedWithoutSendMessage(trs)).toBe(true);
-  });
-
-  it('returns true when send_message was called but failed', () => {
-    expect(loopEndedWithoutSendMessage([failedSendMsgTr(100), endTurnTr(110)])).toBe(true);
-  });
-
-  it('returns true when prior cycle exited via clean send_message (different loop)', () => {
-    // Cycle Y case. Previous cycle (X2) exited cleanly via send_message
-    // (fwup=false). Cycle Y is a new trigger (mention/replied) — its loop
-    // does not include cycle X2's send_message. Walk-back stops at the
-    // clean exit boundary; current loop = react + end_turn only → fallback.
-    const trs = [sendMsgTr(100) /* cycle X2 */, reactTr(200) /* cycle Y */, endTurnTr(210)];
-    expect(loopEndedWithoutSendMessage(trs)).toBe(true);
-  });
-
-  it('returns false when interrupted continuation chains across cycles with send_message earlier', () => {
-    // t+80 hypothetical: cycle A1 step had send_message + bash (fwup=true).
-    // Cycle resumed via interrupt, kept reacting, eventually end_turn'd.
-    // Walk-back crosses the fwup=true chain and finds A1's send_message.
-    const trs = [
-      sendMsgPlusBashTr(80),  // cycle A1 step 1: send_message+bash, interrupted before next step
-      reactTr(160),           // cycle A1 (or B's continuation) step
-      endTurnTr(180),
-    ];
-    expect(loopEndedWithoutSendMessage(trs)).toBe(false);
-  });
-
-  it('returns false on empty trs', () => {
-    expect(loopEndedWithoutSendMessage([])).toBe(false);
-  });
-
-  it('returns true for sleep-loop-without-speaking ended via end_turn', () => {
-    // The original use case for fallback — bot kept doing fwup=true tools
-    // (sleep / react / etc.) without ever sending a message, then end_turn'd.
-    const trs = [
-      sendMsgTr(50),    // earlier cycle, clean exit (different loop boundary)
-      reactTr(100),     // current loop: react
-      reactTr(110),     // react again
-      endTurnTr(120),
-    ];
-    expect(loopEndedWithoutSendMessage(trs)).toBe(true);
-  });
-
-  it('returns true even with stale historical end_turn TRs in trs', () => {
-    // Regression: the old logic would walk back to the most recent end_turn
-    // anywhere in history and re-evaluate THAT loop. Now we only look at the
-    // current cycle's chain — historical end_turn TRs are simply clean exits
-    // that bound earlier loops.
-    const trs = [
-      endTurnTr(50),    // historical end_turn (some old loop's end)
-      sendMsgTr(60),    // historical fallback
-      sendMsgTr(70),    // some other old send
-      reactTr(200),     // current loop
-      endTurnTr(210),
-    ];
-    expect(loopEndedWithoutSendMessage(trs)).toBe(true);
   });
 });
 

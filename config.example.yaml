@@ -20,6 +20,18 @@ models:
     timeoutSec: 60
     maxImagesAllowed: 10
 
+# Chat platform for this process: "telegram" (default) or "feishu".
+# platform: "feishu"
+
+# Feishu/Lark (platform: feishu). Credentials are read from a dotenv-style file,
+# never from this YAML: FEISHU_APP_ID, FEISHU_APP_SECRET, and optional
+# FEISHU_DOMAIN ("feishu" | "lark" | https:// base URL). `.config/` is git-ignored.
+# Feishu chats should set `sendTypingAction: false` (no typing API) and must not
+# enable `tools.banSpammer`. See docs/feishu-implementation.md.
+# feishu:
+#   credentialsFile: ".config/feishu_cn.env"
+
+# Required only when platform is "telegram".
 telegram:
   botToken: ""
   apiId: 0
@@ -43,11 +55,18 @@ backgroundTasks:
   retentionCount: 20
 
 # Every key other than "default" is a resident chat ID. Per-chat objects are
-# deep-merged over default; unconfigured chats are archived but never projected.
+# deep-merged over default. Telegram archives unconfigured chats without projection;
+# Feishu ignores unconfigured groups and private chats entirely.
 chats:
   default:
     primary:
       model: "primary"
+      turnBudget:
+        maxToolRounds: 2
+        maxToolCalls: 4
+        maxParticipationCalls: 3 # combined sends/reactions; end_turn is exempt
+        deadlineMs: 15000 # per wake-up; does not abort an in-flight tool
+        minModelCallMs: 2000 # must be less than deadlineMs
     probe:
       # Probe is mandatory. Omit model to reuse the primary endpoint.
       model: "probe"
@@ -98,7 +117,8 @@ chats:
         # search: "tavily" # tavily | microsoft-grounding | jina | exa
         # fetch: "jina"
 
-  # Replace with a Telegram chat ID to enable residency and Driver processing.
+  # Replace with a Telegram chat ID (or a Feishu `oc_...` group chat ID) to
+  # enable residency and Driver processing.
   "-1000000000000": {}
   # To enable moderation for a specific group:
   # "-1001234567890":

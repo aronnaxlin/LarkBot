@@ -52,7 +52,7 @@ const createFixture = () => {
       imageToText: { enabled: false },
       tools: {
         banSpammer: false,
-        bash: { backgroundThresholdSec: 10 },
+        bash: { enabled: true, backgroundThresholdSec: 10 },
       },
     },
     runtimeConfig: {
@@ -94,6 +94,12 @@ describe('createPrimaryTools', () => {
     const tools = createPrimaryTools(deps);
     expect(tools.some(tool => tool.name === 'ban_spammer')).toBe(false);
     expect(JSON.stringify(tools.map(tool => ({ name: tool.name, description: tool.description })))).not.toContain('ban_spammer');
+  });
+
+  it('omits bash when the chat disables host shell execution', () => {
+    const { deps } = createFixture();
+    deps.chatConfig.tools.bash.enabled = false;
+    expect(createPrimaryTools(deps).some(tool => tool.name === 'bash')).toBe(false);
   });
 
   it('binds moderation to the active chat and preserves its follow-up', async () => {

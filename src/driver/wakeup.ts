@@ -122,9 +122,16 @@ export const executeWakeup = async (params: {
     const requestedAtMs = Date.now();
     const remainingSec = (deadlineAtMs - Date.now() - budget.minModelCallMs) / 1000;
     if (remainingSec <= 0) throw new Error('Turn deadline reached before probe');
-    const probeTimeout = params.chatConfig.probe.model.timeoutSec;
+    const probeModel = params.chatConfig.probe.model;
+    const probeTimeout = probeModel.timeoutSec;
     const result = await callLlm(
-      { ...params.chatConfig.probe.model, timeoutSec: probeTimeout ? Math.min(probeTimeout, remainingSec) : remainingSec, forceToolChoice: { name: 'decide' } },
+      {
+        ...probeModel,
+        timeoutSec: probeTimeout ? Math.min(probeTimeout, remainingSec) : remainingSec,
+        // Thinking-mode providers reject a forced tool_choice; they still call
+        // `decide` on their own when the choice is left free.
+        forceToolChoice: probeModel.forceToolChoice === false ? undefined : { name: 'decide' },
+      },
       entries,
       system,
       [decideTool].map(toToolSchema),
@@ -213,7 +220,8 @@ export const executeWakeup = async (params: {
       deadlineAtMs,
       maxImagesAllowed: params.chatConfig.primary.model.maxImagesAllowed,
       // `end_turn` is a tool, so forcing a tool call still permits silence.
-      forceToolChoice: 'any',
+      // Omitted for providers that reject a forced tool_choice.
+      ...(params.chatConfig.primary.model.forceToolChoice === false ? {} : { forceToolChoice: 'any' as const }),
       onStepComplete: persistStep,
       checkInterrupt: () =>
         params.currentContext() !== params.contextAtStart

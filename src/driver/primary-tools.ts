@@ -143,12 +143,15 @@ export const createPrimaryTools = (deps: PrimaryToolsDependencies): CahciuaTool[
       (messageId, emoji) => deps.setMessageReaction(deps.chatId, messageId, emoji),
       messageExists,
     ),
-    createBashTool(deps.runtimeConfig, {
+  ];
+
+  if (deps.chatConfig.tools.bash.enabled) {
+    tools.push(createBashTool(deps.runtimeConfig, {
       startTask: deps.backgroundTask.startTask,
       sessionId: deps.chatId,
       backgroundThresholdSec: deps.chatConfig.tools.bash.backgroundThresholdSec,
-    }),
-  ];
+    }));
+  }
 
   if (deps.chatConfig.tools.webSearch)
     tools.push(createWebSearchTool(createWebSearcher(deps.chatConfig.tools.webSearch)));

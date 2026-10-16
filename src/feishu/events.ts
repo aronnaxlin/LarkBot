@@ -17,6 +17,21 @@ const MentionSchema = v.looseObject({
   name: v.optional(v.string()),
 });
 
+// Feishu sends absent optional fields as explicit nulls (`parent_id: null`,
+// `mentions: null`, ...), which the optional schemas reject as a type error.
+// Drop nulls before parsing so an absent field is simply absent; a null in a
+// required field still fails, now as missing.
+const dropNulls = (value: unknown): unknown => {
+  if (value === null) return undefined;
+  if (Array.isArray(value)) return value.map(dropNulls).filter(item => item !== undefined);
+  if (typeof value !== 'object') return value;
+  return Object.fromEntries(
+    Object.entries(value as Record<string, unknown>)
+      .map(([key, item]) => [key, dropNulls(item)] as const)
+      .filter(([, item]) => item !== undefined),
+  );
+};
+
 const MessageReceiveSchema = v.looseObject({
   sender: v.looseObject({
     sender_id: v.optional(UserIdSchema),
@@ -47,7 +62,7 @@ export type FeishuMessageReceiveEvent = v.InferOutput<typeof MessageReceiveSchem
 export type FeishuMessageRecalledEvent = v.InferOutput<typeof MessageRecalledSchema>;
 
 export const parseMessageReceiveEvent = (data: unknown): FeishuMessageReceiveEvent =>
-  v.parse(MessageReceiveSchema, data);
+  v.parse(MessageReceiveSchema, dropNulls(data));
 
 export const parseMessageRecalledEvent = (data: unknown): FeishuMessageRecalledEvent =>
-  v.parse(MessageRecalledSchema, data);
+  v.parse(MessageRecalledSchema, dropNulls(data));

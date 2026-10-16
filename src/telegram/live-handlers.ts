@@ -1,11 +1,11 @@
 import type { Logger } from '@guiiai/logg';
 
 import { adaptDelete, adaptEdit, adaptMessage, adaptServiceEvent, isServiceMessage } from './adaptation';
-import type { TelegramEventSink } from './event-sink';
 import type { IngressTelegramMessageDelete } from './ingress-meta';
 import type { TelegramManager } from './manager';
 import { contentToPlainText } from '../adaptation/content';
 import type { CanonicalIMEvent, ContentNode } from '../adaptation/types';
+import type { EventSink } from '../event-sink';
 import type { Attachment, TelegramMessage, TelegramMessageEdit } from './message/types';
 
 export interface TelegramMessageStore {
@@ -21,7 +21,7 @@ export interface TelegramMessageStore {
 
 export const createTelegramLiveHandlers = (deps: {
   manager: TelegramManager;
-  eventSink: TelegramEventSink;
+  eventSink: EventSink;
   messageStore: TelegramMessageStore;
   handleTyping: (chatId: string) => void;
   logger: Logger;

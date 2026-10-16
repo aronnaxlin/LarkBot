@@ -3,7 +3,7 @@ import type { CahciuaTool } from './types';
 import type { BanSpammerResult } from '../../telegram/moderation-types';
 
 export const createBanSpammerTool = (
-  banSpammer: (messageId: number) => Promise<BanSpammerResult>,
+  banSpammer: (messageId: string) => Promise<BanSpammerResult>,
 ): CahciuaTool => createTool({
   name: 'ban_spammer',
   description: 'Permanently ban the verified author of a spam message in this chat and delete known messages that Telegram permits within the 48-hour bot window. Apply the moderation policy in the current chat system files. Eligible targets have fewer than 10 observed messages and a membership status authorized by the backend. After a confirmed ban, send the exact announcement returned by the tool; it describes the completed actions and any remaining cleanup.',
@@ -19,7 +19,7 @@ export const createBanSpammerTool = (
   execute: async input => {
     const { message_id, reason } = input as { message_id: string; reason: string };
     if (reason.trim().length === 0) throw new Error('A moderation reason is required');
-    const result = await banSpammer(Number(message_id));
+    const result = await banSpammer(message_id);
     if (result.status === 'rejected')
       return { content: JSON.stringify(result), requiresFollowUp: true };
 

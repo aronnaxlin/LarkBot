@@ -25,9 +25,10 @@ import { findModerationSender, loadModerationMessageIds } from '../../db/moderat
 import { createDriver } from '../../driver';
 import { createDriverInputBus } from '../../driver/input-bus';
 import { renderOldMessagesXml } from '../../driver/read-old-messages';
+import { createEventSink } from '../../event-sink';
 import {
   createTelegramDriverHooks,
-  createTelegramEventSink,
+  createTelegramDriverPlatform,
   createTelegramLiveHandlers,
   createTelegramPostStartupTasks,
 } from '../../telegram';
@@ -39,10 +40,10 @@ import { TOKENS } from '../tokens';
 export const registerDriver = ({ get, register }: Registrar): void => {
   register(TOKENS.DRIVER_INPUT_BUS, createDriverInputBus);
 
-  register(TOKENS.TELEGRAM_EVENT_SINK, () => {
+  register(TOKENS.EVENT_SINK, () => {
     const db = get(TOKENS.DB);
     const pipeline = get(TOKENS.PIPELINE);
-    return createTelegramEventSink({
+    return createEventSink({
       configuredChatIds: get(TOKENS.CONFIGURED_CHAT_IDS),
       persistEvent: event => persistEvent(db, event),
       hydrateAltText: get(TOKENS.MEDIA_RUNTIME).hydrateAltText,
@@ -56,7 +57,7 @@ export const registerDriver = ({ get, register }: Registrar): void => {
       manager: get(TOKENS.TELEGRAM_MANAGER),
       runtime: get(TOKENS.RUNTIME_CONFIG),
       botUserId: get(TOKENS.TELEGRAM_CLIENTS).bot.botUserId(),
-      eventSink: get(TOKENS.TELEGRAM_EVENT_SINK),
+      eventSink: get(TOKENS.EVENT_SINK),
     });
   });
 
@@ -78,14 +79,11 @@ export const registerDriver = ({ get, register }: Registrar): void => {
     return manager;
   });
 
-  register(TOKENS.DRIVER, () => {
+  register(TOKENS.TELEGRAM_DRIVER_PLATFORM, () => {
     const config = get(TOKENS.CONFIG);
     const db = get(TOKENS.DB);
-    const pipeline = get(TOKENS.PIPELINE);
-    const telegram = get(TOKENS.TELEGRAM_DRIVER_HOOKS);
-    const backgroundTasks = get(TOKENS.BACKGROUND_TASK_MANAGER);
     const bot = get(TOKENS.TELEGRAM_CLIENTS).bot;
-    const eventSink = get(TOKENS.TELEGRAM_EVENT_SINK);
+    const eventSink = get(TOKENS.EVENT_SINK);
     const moderation = createModerationService({
       api: createModerationApi(bot.raw(), bot.botUserId()),
       findSender: (chatId, messageId) => findModerationSender(db, chatId, messageId),
@@ -107,18 +105,28 @@ export const registerDriver = ({ get, register }: Registrar): void => {
       },
       logger: get(TOKENS.LOGGER),
     });
+    return createTelegramDriverPlatform({
+      hooks: get(TOKENS.TELEGRAM_DRIVER_HOOKS),
+      messageExists: (chatId, messageId) => messageExists(db, chatId, messageId),
+      loadMessageAttachments: (chatId, messageId) => loadMessageAttachments(db, chatId, messageId),
+      banSpammer: moderation.banSpammer,
+    });
+  });
+
+  register(TOKENS.DRIVER, () => {
+    const config = get(TOKENS.CONFIG);
+    const db = get(TOKENS.DB);
+    const pipeline = get(TOKENS.PIPELINE);
+    const backgroundTasks = get(TOKENS.BACKGROUND_TASK_MANAGER);
+    const platform = get(TOKENS.DRIVER_PLATFORM);
     return createDriver({
       chatIds: get(TOKENS.CHAT_IDS),
       resolveChatConfig: id => resolveChatConfig(config, id),
     }, {
+      ...platform,
       loadTurnResponses: (chatId, afterMs) => loadTurnResponses(db, chatId, afterMs),
       persistTurnResponse: (chatId, response) => persistTurnResponse(db, chatId, response),
       persistProbeResponse: (chatId, response) => persistProbeResponse(db, chatId, response),
-      sendTypingAction: telegram.sendTypingAction,
-      setMessageReaction: telegram.setMessageReaction,
-      onDebounceStateChange: telegram.onDebounceStateChange,
-      sendMessage: telegram.sendMessage,
-      banSpammer: moderation.banSpammer,
       loadCompaction: chatId => loadCompaction(db, chatId),
       loadLastProbeTime: chatId => loadLastProbeTime(db, chatId),
       persistCompaction: (chatId, meta) => persistCompaction(db, chatId, meta),
@@ -133,9 +141,6 @@ export const registerDriver = ({ get, register }: Registrar): void => {
         return context.chatTitle;
       },
       runtimeConfig: get(TOKENS.RUNTIME_CONFIG),
-      loadMessageAttachments: (chatId, messageId) => loadMessageAttachments(db, chatId, messageId),
-      messageExists: (chatId, messageId) => messageExists(db, chatId, messageId),
-      downloadMessageMedia: telegram.downloadMessageMedia,
       readOldMessages: (chatId, messageIds) =>
         renderOldMessagesXml(chatId, loadEventsByMessageIds(db, chatId, messageIds), pipeline.getRenderParams(chatId)),
       resolveModel: name => resolveModel(config, name),
@@ -154,7 +159,7 @@ export const registerDriver = ({ get, register }: Registrar): void => {
     const db = get(TOKENS.DB);
     return createTelegramLiveHandlers({
       manager: get(TOKENS.TELEGRAM_MANAGER),
-      eventSink: get(TOKENS.TELEGRAM_EVENT_SINK),
+      eventSink: get(TOKENS.EVENT_SINK),
       messageStore: {
         loadLatestMessageContent: (chatId, messageId) => loadLatestMessageContent(db, chatId, messageId),
         persistMessage: message => persistMessage(db, message),

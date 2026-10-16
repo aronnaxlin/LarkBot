@@ -3,11 +3,14 @@ import type { Logger } from '@guiiai/logg';
 import type { createBackgroundTaskManager } from '../background-task/manager';
 import type { BackgroundTasksConfig, Config, RuntimeConfig } from '../config/config';
 import type { DB } from '../db/client';
-import type { createDriver } from '../driver';
+import type { createDriver, DriverPlatform } from '../driver';
 import type { DriverInputBus } from '../driver/input-bus';
+import type { EventSink } from '../event-sink';
+import type { FeishuBotIdentity, FeishuIngress, FeishuSdk } from '../feishu';
 import type { MediaRuntime } from '../media/runtime';
 import type { createPipeline } from '../pipeline';
-import type { TelegramDriverHooks, TelegramEventSink, TelegramLiveHandlers, TelegramManager, TelegramPostStartupTasks } from '../telegram';
+import type { PlatformIdentity, PlatformRuntime } from '../startup/platform';
+import type { TelegramDriverHooks, TelegramLiveHandlers, TelegramManager, TelegramPostStartupTasks } from '../telegram';
 import type { TelegramClients } from '../telegram/manager';
 
 declare const tokenType: unique symbol;
@@ -32,10 +35,21 @@ export const TOKENS = {
   TELEGRAM_MANAGER: token<TelegramManager>('TelegramManager'),
   PIPELINE: token<ReturnType<typeof createPipeline>>('Pipeline'),
   DRIVER_INPUT_BUS: token<DriverInputBus>('DriverInputBus'),
-  TELEGRAM_EVENT_SINK: token<TelegramEventSink>('TelegramEventSink'),
+  EVENT_SINK: token<EventSink>('EventSink'),
   TELEGRAM_DRIVER_HOOKS: token<TelegramDriverHooks>('TelegramDriverHooks'),
+  TELEGRAM_DRIVER_PLATFORM: token<DriverPlatform>('TelegramDriverPlatform'),
   BACKGROUND_TASK_MANAGER: token<ReturnType<typeof createBackgroundTaskManager>>('BackgroundTaskManager'),
   DRIVER: token<ReturnType<typeof createDriver>>('Driver'),
   TELEGRAM_LIVE_HANDLERS: token<TelegramLiveHandlers>('TelegramLiveHandlers'),
   TELEGRAM_POST_STARTUP_TASKS: token<TelegramPostStartupTasks>('TelegramPostStartupTasks'),
+  FEISHU_SDK: token<FeishuSdk>('FeishuSdk'),
+  FEISHU_BOT_IDENTITY: token<FeishuBotIdentity>('FeishuBotIdentity'),
+  FEISHU_INGRESS: token<FeishuIngress>('FeishuIngress'),
+  FEISHU_DRIVER_PLATFORM: token<DriverPlatform>('FeishuDriverPlatform'),
+  FEISHU_RUNTIME: token<PlatformRuntime>('FeishuRuntime'),
+  TELEGRAM_RUNTIME: token<PlatformRuntime>('TelegramRuntime'),
+  // Resolve to the implementation selected by `config.platform`.
+  PLATFORM_IDENTITY: token<PlatformIdentity>('PlatformIdentity'),
+  PLATFORM_RUNTIME: token<PlatformRuntime>('PlatformRuntime'),
+  DRIVER_PLATFORM: token<DriverPlatform>('DriverPlatform'),
 } as const;

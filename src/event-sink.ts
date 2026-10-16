@@ -1,7 +1,7 @@
-import type { CanonicalIMEvent } from '../adaptation/types';
-import type { RenderedContext } from '../rendering/types';
+import type { CanonicalIMEvent } from './adaptation/types';
+import type { RenderedContext } from './rendering/types';
 
-export interface TelegramEventSink {
+export interface EventSink {
   persist(event: CanonicalIMEvent): void;
   publish(event: CanonicalIMEvent, options?: {
     hydrateAltText?: boolean;
@@ -13,13 +13,13 @@ export interface TelegramEventSink {
   }): RenderedContext | undefined;
 }
 
-export const createTelegramEventSink = (deps: {
+export const createEventSink = (deps: {
   configuredChatIds: ReadonlySet<string>;
   persistEvent: (event: CanonicalIMEvent) => void;
   hydrateAltText: (event: CanonicalIMEvent) => void;
   pushPipelineEvent: (chatId: string, event: CanonicalIMEvent) => RenderedContext;
   handleDriverEvent: (chatId: string, context: RenderedContext) => void;
-}): TelegramEventSink => {
+}): EventSink => {
   const persisted = new WeakSet<CanonicalIMEvent>();
   const published = new WeakMap<CanonicalIMEvent, RenderedContext>();
   const notified = new WeakSet<CanonicalIMEvent>();
@@ -30,7 +30,7 @@ export const createTelegramEventSink = (deps: {
     persisted.add(event);
   };
 
-  const publish: TelegramEventSink['publish'] = (event, options = {}) => {
+  const publish: EventSink['publish'] = (event, options = {}) => {
     if (!deps.configuredChatIds.has(event.chatId)) return undefined;
     let context = published.get(event);
     if (!context) {
@@ -45,7 +45,7 @@ export const createTelegramEventSink = (deps: {
     return context;
   };
 
-  const accept: TelegramEventSink['accept'] = (event, options) => {
+  const accept: EventSink['accept'] = (event, options) => {
     persist(event);
     return publish(event, options);
   };

@@ -2,6 +2,7 @@ import { execFile } from 'node:child_process';
 
 import type { Logger } from '@guiiai/logg';
 
+import type { DriverPlatform } from './platform';
 import {
   createAttachmentDownloader,
   createBanSpammerTool,
@@ -18,15 +19,13 @@ import {
   createWebFetchTool,
   createWebSearchTool,
 } from './tools';
-import type { CahciuaTool, SendMessageAttachment } from './tools';
+import type { CahciuaTool } from './tools';
 import { createWebFetcher } from './web-fetch';
 import { createWebSearcher } from './web-search';
 import type { ResolvedChatConfig, RuntimeConfig } from '../config/config';
 import type { LlmEndpoint } from '../llm/types';
 import { renderImageToTextSystemPrompt } from '../media/image-to-text-prompt';
 import { callDescriptionLlm } from '../media/llm-description';
-import type { Attachment } from '../telegram/message/types';
-import type { BanSpammerResult } from '../telegram/moderation-types';
 
 type ImageDetail = 'low' | 'high';
 
@@ -35,21 +34,13 @@ export interface PrimaryToolsConfig {
   tools: ResolvedChatConfig['tools'];
 }
 
-export interface PrimaryToolsDependencies {
+export interface PrimaryToolsDependencies extends Pick<
+  DriverPlatform,
+  'sendMessage' | 'banSpammer' | 'setMessageReaction' | 'loadMessageAttachments' | 'messageExists' | 'downloadMessageMedia'
+> {
   chatId: string;
   chatConfig: PrimaryToolsConfig;
   runtimeConfig: RuntimeConfig;
-  sendMessage: (
-    chatId: string,
-    text: string,
-    replyToMessageId?: number,
-    attachments?: SendMessageAttachment[],
-  ) => Promise<{ messageId: number }>;
-  banSpammer: (chatId: string, messageId: number) => Promise<BanSpammerResult>;
-  setMessageReaction: (chatId: string, messageId: number, emoji: string | undefined) => Promise<void>;
-  loadMessageAttachments: (chatId: string, messageId: number) => Attachment[] | undefined;
-  messageExists: (chatId: string, messageId: number) => boolean;
-  downloadMessageMedia: (chatId: string, messageId: number) => Promise<Buffer | undefined>;
   readOldMessages: (chatId: string, messageIds: string[]) => Promise<string> | string;
   resolveModel: (name: string) => LlmEndpoint;
   backgroundTask: {
@@ -108,8 +99,17 @@ const createImageToTextResolver = (
   };
 };
 
+const createUnsupportedAttachmentDownloader = () => async (): Promise<Buffer> => {
+  throw new Error('Chat attachments are not available on this platform. Use `path` for local files.');
+};
+
 export const createPrimaryTools = (deps: PrimaryToolsDependencies): CahciuaTool[] => {
-  const messageExists = (messageId: number) => deps.messageExists(deps.chatId, messageId);
+  const { loadMessageAttachments, downloadMessageMedia, banSpammer } = deps;
+  if ((loadMessageAttachments == null) !== (downloadMessageMedia == null))
+    throw new Error('Platform attachment capability requires both loadMessageAttachments and downloadMessageMedia');
+  const attachmentsSupported = loadMessageAttachments != null && downloadMessageMedia != null;
+
+  const messageExists = (messageId: string) => deps.messageExists(deps.chatId, messageId);
   const sendMessageTool = createSendMessageTool(async (text, replyTo, attachments) => {
     deps.log.withFields({
       chatId: deps.chatId,
@@ -120,22 +120,24 @@ export const createPrimaryTools = (deps: PrimaryToolsDependencies): CahciuaTool[
     const sent = await deps.sendMessage(
       deps.chatId,
       text,
-      replyTo ? Number(replyTo) : undefined,
+      replyTo,
       attachments,
     );
-    return { messageId: String(sent.messageId) };
-  }, messageExists);
+    return { messageId: sent.messageId };
+  }, messageExists, { attachments: attachmentsSupported });
 
-  const downloadAttachment = createAttachmentDownloader({
-    chatId: deps.chatId,
-    loadMessageAttachments: deps.loadMessageAttachments,
-    downloadMessageMedia: deps.downloadMessageMedia,
-  });
+  const downloadAttachment = attachmentsSupported
+    ? createAttachmentDownloader({
+        chatId: deps.chatId,
+        loadMessageAttachments,
+        downloadMessageMedia,
+      })
+    : createUnsupportedAttachmentDownloader();
 
   const tools: CahciuaTool[] = [
     sendMessageTool,
-    ...(deps.chatConfig.tools.banSpammer
-      ? [createBanSpammerTool(messageId => deps.banSpammer(deps.chatId, messageId))]
+    ...(deps.chatConfig.tools.banSpammer && banSpammer
+      ? [createBanSpammerTool(messageId => banSpammer(deps.chatId, messageId))]
       : []),
     createReactTool(
       (messageId, emoji) => deps.setMessageReaction(deps.chatId, messageId, emoji),
@@ -153,11 +155,13 @@ export const createPrimaryTools = (deps: PrimaryToolsDependencies): CahciuaTool[
   if (deps.chatConfig.tools.webFetch)
     tools.push(createWebFetchTool(createWebFetcher(deps.chatConfig.tools.webFetch)));
 
-  tools.push(
-    createDownloadFileTool({
+  if (attachmentsSupported) {
+    tools.push(createDownloadFileTool({
       downloadAttachment,
       runtime: deps.runtimeConfig,
-    }),
+    }));
+  }
+  tools.push(
     createReadImageTool({
       downloadAttachment,
       readFile: createFileReader(deps.runtimeConfig),

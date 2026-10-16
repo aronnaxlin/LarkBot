@@ -39,7 +39,8 @@ const fixture = () => {
     forward_info TEXT,
     is_self_sent INTEGER,
     service_action TEXT,
-    runtime_data TEXT
+    runtime_data TEXT,
+    dedup_key TEXT
   )`);
   const db = drizzle(sqlite, { schema });
   const insert = sqlite.prepare(`INSERT INTO events

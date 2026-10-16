@@ -2,19 +2,19 @@ import { execFile } from 'node:child_process';
 
 import { adaptMessage } from './adaptation';
 import type { BotInfo, SentMessage } from './bot';
-import type { TelegramEventSink } from './event-sink';
 import type { IngressTelegramMessage } from './ingress-meta';
 import type { TelegramManager } from './manager';
 import { renderMarkdownToTelegramHTML } from './markdown';
 import type { RuntimeConfig } from '../config/config';
 import type { SendMessageAttachment } from '../driver/tools';
+import type { EventSink } from '../event-sink';
 import type { Attachment } from './message/types';
 
 export const createTelegramDriverHooks = (deps: {
   manager: TelegramManager;
   runtime: RuntimeConfig;
   botUserId: string;
-  eventSink: TelegramEventSink;
+  eventSink: EventSink;
 }) => {
   const readWorkspaceFile = (path: string): Promise<Buffer> =>
     new Promise<Buffer>((resolve, reject) => {

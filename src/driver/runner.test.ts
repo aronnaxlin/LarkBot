@@ -1,12 +1,14 @@
 import { Format, initLogger, LogLevel, useLogger } from '@guiiai/logg';
-import { beforeEach, describe, expect, it, vi } from 'vitest';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
 vi.mock('../llm/call', () => ({ callLlm: vi.fn() }));
 
 import { createRunner } from './runner';
 import { createTool } from './tools/create-tool';
+import { DEFAULT_TURN_BUDGET } from './turn-loop';
+import type { TurnBudget } from './types';
 import { callLlm, type LlmCallUsage } from '../llm/call';
-import type { ConversationEntry } from '../unified-api/types';
+import type { ConversationEntry, ToolResult } from '../unified-api/types';
 
 initLogger(LogLevel.Error, Format.Pretty);
 const logger = useLogger('runner-test');
@@ -45,6 +47,8 @@ const initialEntries: ConversationEntry[] = [{
   role: 'user',
   parts: [{ kind: 'text', text: 'start' }],
 }];
+
+const roundsBudget = (maxToolRounds: number): TurnBudget => ({ ...DEFAULT_TURN_BUDGET, maxToolRounds });
 
 const createTestRunner = () => createRunner({
   apiBaseUrl: 'mock',
@@ -87,7 +91,8 @@ describe('runner step operations', () => {
       entries: initialEntries,
       system: 'system',
       tools: [rejectedTool, selectedTool],
-      maxSteps: 1,
+      budget: roundsBudget(1),
+      deadlineAtMs: Date.now() + 60_000,
       forceToolChoice: { name: 'send_message' },
       onStepComplete,
       checkInterrupt: () => false,
@@ -130,7 +135,8 @@ describe('runner turn loop', () => {
       entries: initialEntries,
       system: 'system',
       tools: [],
-      maxSteps: 3,
+      budget: roundsBudget(3),
+      deadlineAtMs: Date.now() + 60_000,
       onStepComplete,
       checkInterrupt,
       log: logger,
@@ -196,7 +202,8 @@ describe('runner turn loop', () => {
       entries: initialEntries,
       system: 'system',
       tools: [stopTool, continueTool],
-      maxSteps: 2,
+      budget: roundsBudget(2),
+      deadlineAtMs: Date.now() + 60_000,
       onStepComplete,
       checkInterrupt,
       log: logger,
@@ -232,7 +239,8 @@ describe('runner turn loop', () => {
       entries: initialEntries,
       system: 'system',
       tools: [tool],
-      maxSteps: 3,
+      budget: roundsBudget(3),
+      deadlineAtMs: Date.now() + 60_000,
       onStepComplete,
       checkInterrupt,
       log: logger,
@@ -241,5 +249,369 @@ describe('runner turn loop', () => {
     expect(onStepComplete).toHaveBeenCalledOnce();
     expect(checkInterrupt).not.toHaveBeenCalled();
     expect(mockCallLlm).toHaveBeenCalledOnce();
+  });
+});
+
+describe('runner turn budget', () => {
+  const workTool = (name: string, execute = vi.fn(() => ({ content: name, requiresFollowUp: true }))) => ({
+    tool: createTool({
+      name,
+      description: 'Test tool.',
+      parameters: { type: 'object', properties: {} },
+      execute,
+    }),
+    execute,
+  });
+  const participationTools = () => ({
+    send: workTool('send_message', vi.fn(() => ({ content: '{"ok":true}', requiresFollowUp: false }))),
+    react: workTool('react', vi.fn(() => ({ content: '{"ok":true}', requiresFollowUp: true }))),
+    endTurn: workTool('end_turn', vi.fn(() => ({ content: '{"ok":true}', requiresFollowUp: false }))),
+  });
+  const schemaNames = (callIndex: number) =>
+    mockCallLlm.mock.calls[callIndex]?.[3]?.map(schema => schema.name);
+  const persistedResults = (onStepComplete: { mock: { calls: unknown[][] } }, stepIndex: number): ToolResult[] =>
+    (onStepComplete.mock.calls[stepIndex]?.[0] as ConversationEntry[])
+      .filter((entry): entry is ToolResult => entry.kind === 'toolResult');
+
+  it('ends silently on end_turn without any forced send', async () => {
+    const { send, react, endTurn } = participationTools();
+    mockCallLlm.mockResolvedValue({ entries: toolCallEntries({ callId: 'end', name: 'end_turn' }), usage: makeUsage() });
+    const onStepComplete = vi.fn(async () => {});
+
+    await createTestRunner().runStepLoop({
+      chatId: 'silence',
+      entries: initialEntries,
+      system: 'system',
+      tools: [send.tool, react.tool, endTurn.tool],
+      budget: DEFAULT_TURN_BUDGET,
+      deadlineAtMs: Date.now() + 60_000,
+      forceToolChoice: 'any',
+      onStepComplete,
+      checkInterrupt: () => false,
+      log: logger,
+    });
+
+    expect(mockCallLlm).toHaveBeenCalledOnce();
+    expect(mockCallLlm.mock.calls[0]?.[0].forceToolChoice).toBe('any');
+    expect(send.execute).not.toHaveBeenCalled();
+    expect(onStepComplete).toHaveBeenCalledOnce();
+  });
+
+  it('completes a reaction-only turn with react then end_turn', async () => {
+    const { send, react, endTurn } = participationTools();
+    mockCallLlm
+      .mockResolvedValueOnce({ entries: toolCallEntries({ callId: 'r', name: 'react' }), usage: makeUsage() })
+      .mockResolvedValueOnce({ entries: toolCallEntries({ callId: 'e', name: 'end_turn' }), usage: makeUsage() });
+    const onStepComplete = vi.fn(async () => {});
+
+    await createTestRunner().runStepLoop({
+      chatId: 'react-then-end',
+      entries: initialEntries,
+      system: 'system',
+      tools: [send.tool, react.tool, endTurn.tool],
+      budget: DEFAULT_TURN_BUDGET,
+      deadlineAtMs: Date.now() + 60_000,
+      onStepComplete,
+      checkInterrupt: () => false,
+      log: logger,
+    });
+
+    expect(react.execute).toHaveBeenCalledOnce();
+    expect(send.execute).not.toHaveBeenCalled();
+    expect(mockCallLlm).toHaveBeenCalledTimes(2);
+    expect(onStepComplete).toHaveBeenCalledTimes(2);
+  });
+
+  it('closes the turn when end_turn is called beside a follow-up result', async () => {
+    const { send, react, endTurn } = participationTools();
+    mockCallLlm.mockResolvedValue({
+      entries: toolCallEntries({ callId: 'r', name: 'react' }, { callId: 'e', name: 'end_turn' }),
+      usage: makeUsage(),
+    });
+    const onStepComplete = vi.fn(async (_entries: ConversationEntry[]) => {});
+    const checkInterrupt = vi.fn(() => false);
+
+    await createTestRunner().runStepLoop({
+      chatId: 'parallel-react-end',
+      entries: initialEntries,
+      system: 'system',
+      tools: [send.tool, react.tool, endTurn.tool],
+      budget: DEFAULT_TURN_BUDGET,
+      deadlineAtMs: Date.now() + 60_000,
+      onStepComplete,
+      checkInterrupt,
+      log: logger,
+    });
+
+    expect(react.execute).toHaveBeenCalledOnce();
+    expect(mockCallLlm).toHaveBeenCalledOnce();
+    expect(checkInterrupt).not.toHaveBeenCalled();
+    expect(persistedResults(onStepComplete, 0).every(result => !result.requiresFollowUp)).toBe(true);
+  });
+
+  it('stops new tool rounds at the cap and runs one participation-only wrap-up', async () => {
+    const { send, react, endTurn } = participationTools();
+    const bash = workTool('bash');
+    mockCallLlm
+      .mockResolvedValueOnce({ entries: toolCallEntries({ callId: 'b1', name: 'bash' }), usage: makeUsage() })
+      .mockResolvedValueOnce({ entries: toolCallEntries({ callId: 'b2', name: 'bash' }), usage: makeUsage() })
+      .mockResolvedValueOnce({
+        entries: toolCallEntries({ callId: 'b3', name: 'bash' }, { callId: 'r', name: 'react' }),
+        usage: makeUsage(),
+      });
+    const onStepComplete = vi.fn(async (_entries: ConversationEntry[]) => {});
+
+    await createTestRunner().runStepLoop({
+      chatId: 'round-cap',
+      entries: initialEntries,
+      system: 'system',
+      tools: [send.tool, react.tool, bash.tool, endTurn.tool],
+      budget: DEFAULT_TURN_BUDGET,
+      deadlineAtMs: Date.now() + 60_000,
+      forceToolChoice: 'any',
+      onStepComplete,
+      checkInterrupt: () => false,
+      log: logger,
+    });
+
+    expect(mockCallLlm).toHaveBeenCalledTimes(3);
+    expect(schemaNames(0)).toEqual(['send_message', 'react', 'bash', 'end_turn']);
+    expect(schemaNames(2)).toEqual(['send_message', 'react', 'end_turn']);
+    // The wrap-up's stray work call is answered without running.
+    expect(bash.execute).toHaveBeenCalledTimes(2);
+    expect(react.execute).toHaveBeenCalledOnce();
+    const wrapUpResults = persistedResults(onStepComplete, 2);
+    expect(wrapUpResults.find(result => result.callId === 'b3')?.payload).toContain('budget');
+    expect(wrapUpResults.every(result => !result.requiresFollowUp)).toBe(true);
+  });
+
+  it('executes parallel work calls only up to the call cap', async () => {
+    const { send, react, endTurn } = participationTools();
+    const search = workTool('web_search');
+    mockCallLlm
+      .mockResolvedValueOnce({
+        entries: toolCallEntries(
+          { callId: 's1', name: 'web_search' },
+          { callId: 's2', name: 'web_search' },
+          { callId: 'm', name: 'send_message', args: '{}' },
+          { callId: 's3', name: 'web_search' },
+          { callId: 's4', name: 'web_search' },
+          { callId: 's5', name: 'web_search' },
+        ),
+        usage: makeUsage(),
+      })
+      .mockResolvedValueOnce({ entries: toolCallEntries({ callId: 'e', name: 'end_turn' }), usage: makeUsage() });
+    const onStepComplete = vi.fn(async (_entries: ConversationEntry[]) => {});
+
+    await createTestRunner().runStepLoop({
+      chatId: 'call-cap',
+      entries: initialEntries,
+      system: 'system',
+      tools: [send.tool, react.tool, search.tool, endTurn.tool],
+      budget: DEFAULT_TURN_BUDGET,
+      deadlineAtMs: Date.now() + 60_000,
+      onStepComplete,
+      checkInterrupt: () => false,
+      log: logger,
+    });
+
+    expect(search.execute).toHaveBeenCalledTimes(4);
+    expect(send.execute).toHaveBeenCalledOnce();
+    const firstResults = persistedResults(onStepComplete, 0);
+    expect(firstResults.map(result => result.callId)).toEqual(['s1', 's2', 'm', 's3', 's4', 's5']);
+    expect(firstResults.at(-1)?.payload).toContain('budget');
+    // Calls exhausted: the next step is the wrap-up.
+    expect(schemaNames(1)).toEqual(['send_message', 'react', 'end_turn']);
+  });
+
+  it('starts an inherited exhausted chain directly at the wrap-up', async () => {
+    const { send, react, endTurn } = participationTools();
+    const bash = workTool('bash');
+    mockCallLlm.mockResolvedValue({ entries: toolCallEntries({ callId: 'e', name: 'end_turn' }), usage: makeUsage() });
+
+    await createTestRunner().runStepLoop({
+      chatId: 'inherited',
+      entries: initialEntries,
+      system: 'system',
+      tools: [send.tool, react.tool, bash.tool, endTurn.tool],
+      budget: DEFAULT_TURN_BUDGET,
+      budgetUsed: { toolRounds: 2, toolCalls: 2 },
+      deadlineAtMs: Date.now() + 60_000,
+      onStepComplete: async () => {},
+      checkInterrupt: () => false,
+      log: logger,
+    });
+
+    expect(mockCallLlm).toHaveBeenCalledOnce();
+    expect(schemaNames(0)).toEqual(['send_message', 'react', 'end_turn']);
+  });
+
+  it('bounds sends and reactions across an inherited chain while still allowing end_turn', async () => {
+    const { send, react, endTurn } = participationTools();
+    mockCallLlm.mockResolvedValue({
+      entries: toolCallEntries(
+        { callId: 's1', name: 'send_message' },
+        { callId: 'r1', name: 'react' },
+        { callId: 's2', name: 'send_message' },
+        { callId: 'end', name: 'end_turn' },
+      ), usage: makeUsage(),
+    });
+    const onStepComplete = vi.fn(async (_entries: ConversationEntry[]) => {});
+    await createTestRunner().runStepLoop({
+      chatId: 'participation-cap', entries: initialEntries, system: 'system',
+      tools: [send.tool, react.tool, endTurn.tool], budget: DEFAULT_TURN_BUDGET,
+      budgetUsed: { toolRounds: 1, toolCalls: 0, participationCalls: 2 },
+      deadlineAtMs: Date.now() + 60_000, onStepComplete,
+      checkInterrupt: () => false, log: logger,
+    });
+    expect(send.execute).toHaveBeenCalledOnce();
+    expect(react.execute).not.toHaveBeenCalled();
+    expect(endTurn.execute).toHaveBeenCalledOnce();
+    expect(persistedResults(onStepComplete, 0)).toHaveLength(4);
+    expect(persistedResults(onStepComplete, 0).every(result => !result.requiresFollowUp)).toBe(true);
+  });
+
+  describe('deadline', () => {
+    beforeEach(() => {
+      vi.useFakeTimers({ toFake: ['Date'] });
+    });
+    afterEach(() => {
+      vi.useRealTimers();
+    });
+
+    it('caps the model timeout and closes silently when no time is left for another step', async () => {
+      const { send, react, endTurn } = participationTools();
+      const slow = workTool('bash', vi.fn(() => {
+        vi.setSystemTime(Date.now() + 9_000);
+        return { content: 'slow', requiresFollowUp: true };
+      }));
+      mockCallLlm.mockResolvedValue({ entries: toolCallEntries({ callId: 'b', name: 'bash' }), usage: makeUsage() });
+      const onStepComplete = vi.fn(async (_entries: ConversationEntry[]) => {});
+      const checkInterrupt = vi.fn(() => false);
+
+      await createRunner({
+        apiBaseUrl: 'mock',
+        apiKey: 'key',
+        model: 'mock-model',
+        apiFormat: 'openai-chat',
+        timeoutSec: 120,
+      }).runStepLoop({
+        chatId: 'deadline',
+        entries: initialEntries,
+        system: 'system',
+        tools: [send.tool, react.tool, slow.tool, endTurn.tool],
+        budget: DEFAULT_TURN_BUDGET,
+        deadlineAtMs: Date.now() + 10_000,
+        onStepComplete,
+        checkInterrupt,
+        log: logger,
+      });
+
+      expect(mockCallLlm).toHaveBeenCalledOnce();
+      expect(mockCallLlm.mock.calls[0]?.[0].timeoutSec).toBeLessThanOrEqual(10);
+      expect(slow.execute).toHaveBeenCalledOnce();
+      // The executed result is persisted, but the chain does not stay open.
+      expect(persistedResults(onStepComplete, 0)).toEqual([
+        { kind: 'toolResult', callId: 'b', payload: 'slow', requiresFollowUp: false },
+      ]);
+      expect(checkInterrupt).not.toHaveBeenCalled();
+    });
+
+    it('skips later side effects in the same batch after a running tool exceeds the deadline', async () => {
+      const { send, react, endTurn } = participationTools();
+      const slow = workTool('bash', vi.fn(() => {
+        vi.setSystemTime(Date.now() + 20_000);
+        return { content: 'finished', requiresFollowUp: true };
+      }));
+      const second = workTool('web_search');
+      mockCallLlm.mockResolvedValue({
+        entries: toolCallEntries(
+          { callId: 'a', name: 'bash' },
+          { callId: 'b', name: 'web_search' },
+          { callId: 's', name: 'send_message' },
+        ), usage: makeUsage(),
+      });
+      const onStepComplete = vi.fn(async (_entries: ConversationEntry[]) => {});
+      await createTestRunner().runStepLoop({
+        chatId: 'expired-batch', entries: initialEntries, system: 'system',
+        tools: [slow.tool, second.tool, send.tool, react.tool, endTurn.tool],
+        budget: DEFAULT_TURN_BUDGET, deadlineAtMs: Date.now() + 10_000,
+        onStepComplete, checkInterrupt: () => false, log: logger,
+      });
+      expect(slow.execute).toHaveBeenCalledOnce();
+      expect(second.execute).not.toHaveBeenCalled();
+      expect(send.execute).not.toHaveBeenCalled();
+      expect(persistedResults(onStepComplete, 0)).toHaveLength(3);
+      expect(persistedResults(onStepComplete, 0).every(result => !result.requiresFollowUp)).toBe(true);
+    });
+
+    it('does not start a model call once the deadline has passed', async () => {
+      const onStepComplete = vi.fn(async () => {});
+
+      await expect(createTestRunner().runStepLoop({
+        chatId: 'expired',
+        entries: initialEntries,
+        system: 'system',
+        tools: [],
+        budget: DEFAULT_TURN_BUDGET,
+        deadlineAtMs: Date.now() + 1_000,
+        onStepComplete,
+        checkInterrupt: () => false,
+        log: logger,
+      })).rejects.toThrow('Turn deadline reached');
+
+      expect(mockCallLlm).not.toHaveBeenCalled();
+      expect(onStepComplete).not.toHaveBeenCalled();
+    });
+  });
+
+  it('keeps earlier persisted steps when a later model call fails', async () => {
+    const bash = workTool('bash');
+    mockCallLlm
+      .mockResolvedValueOnce({ entries: toolCallEntries({ callId: 'b', name: 'bash' }), usage: makeUsage() })
+      .mockRejectedValueOnce(new Error('provider down'));
+    const order: string[] = [];
+    const onStepComplete = vi.fn(async () => { order.push('persist'); });
+
+    await expect(createTestRunner().runStepLoop({
+      chatId: 'model-error',
+      entries: initialEntries,
+      system: 'system',
+      tools: [bash.tool],
+      budget: DEFAULT_TURN_BUDGET,
+      deadlineAtMs: Date.now() + 60_000,
+      onStepComplete,
+      checkInterrupt: () => { order.push('interrupt'); return false; },
+      log: logger,
+    })).rejects.toThrow('provider down');
+
+    expect(order).toEqual(['persist', 'interrupt']);
+    expect(bash.execute).toHaveBeenCalledOnce();
+  });
+
+  it('persists a failing tool as an error result before the next step', async () => {
+    const failing = workTool('bash', vi.fn(() => { throw new Error('boom'); }));
+    const { endTurn } = participationTools();
+    mockCallLlm
+      .mockResolvedValueOnce({ entries: toolCallEntries({ callId: 'b', name: 'bash' }), usage: makeUsage() })
+      .mockResolvedValueOnce({ entries: toolCallEntries({ callId: 'e', name: 'end_turn' }), usage: makeUsage() });
+    const onStepComplete = vi.fn(async (_entries: ConversationEntry[]) => {});
+
+    await createTestRunner().runStepLoop({
+      chatId: 'tool-error',
+      entries: initialEntries,
+      system: 'system',
+      tools: [failing.tool, endTurn.tool],
+      budget: DEFAULT_TURN_BUDGET,
+      deadlineAtMs: Date.now() + 60_000,
+      onStepComplete,
+      checkInterrupt: () => false,
+      log: logger,
+    });
+
+    const [result] = persistedResults(onStepComplete, 0);
+    expect(result).toMatchObject({ callId: 'b', requiresFollowUp: true });
+    expect(result?.payload).toContain('boom');
+    expect(mockCallLlm).toHaveBeenCalledTimes(2);
   });
 });

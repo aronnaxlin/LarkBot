@@ -28,11 +28,13 @@ const compactionSystemTemplate = readFileSync(resolve(__dirname, '../../prompts/
 const compactionUserTemplate = readFileSync(resolve(__dirname, '../../prompts/compaction-late-binding.velin.md'), 'utf-8');
 
 export type PromptMode = 'primary' | 'probe';
+// Chat platform, matching DriverPlatform['name'].
+export type PromptChannel = 'telegram' | 'feishu';
 
 export const renderSystemPrompt = async (params: {
   mode: PromptMode;
   modelName: string;
-  currentChannel?: string;
+  currentChannel: PromptChannel;
   chatId: string;
   chatTitle?: string;
   systemFiles?: { filename: string; content: string }[];
@@ -43,6 +45,7 @@ export const renderSystemPrompt = async (params: {
 
 export const renderLateBindingPrompt = async (params: {
   mode: PromptMode;
+  currentChannel: PromptChannel;
   timeNow: string;
   isInterrupted?: boolean;
   activeBackgroundTasks?: { id: number; typeName: string; intention?: string; liveSummary: string; startedMs: number; timeoutMs: number }[];

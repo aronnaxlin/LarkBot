@@ -1,13 +1,8 @@
-import * as tdl from 'tdl';
-
 import { contentToPlainText } from '../adaptation/content';
 import { buildContainer } from '../container';
 import { TOKENS } from '../container/tokens';
 import { loadCompaction, loadEventsWithId, loadKnownChatIds, migrateV1ToV2 } from '../db';
 import { selectStartupReplayChatIds } from './chat-selection';
-import { resolveTdjson } from '../telegram/tdjson';
-
-tdl.configure({ tdjson: resolveTdjson() });
 
 export const startApp = async (): Promise<void> => {
   const container = buildContainer();
@@ -15,6 +10,8 @@ export const startApp = async (): Promise<void> => {
   const db = container.get(TOKENS.DB);
   try {
     await migrateV1ToV2(db, logger);
+    // Pipeline rendering needs the bot identity before cold replay.
+    await container.get(TOKENS.PLATFORM_IDENTITY).prepare();
   } catch (error) {
     db.$client.close();
     try {
@@ -28,14 +25,12 @@ export const startApp = async (): Promise<void> => {
   const chatIds = container.get(TOKENS.CHAT_IDS);
   const media = container.get(TOKENS.MEDIA_RUNTIME);
   const pipeline = container.get(TOKENS.PIPELINE);
-  const telegram = container.get(TOKENS.TELEGRAM_MANAGER);
+  const platform = container.get(TOKENS.PLATFORM_RUNTIME);
   const driver = container.get(TOKENS.DRIVER);
   const driverInput = container.get(TOKENS.DRIVER_INPUT_BUS);
   const backgroundTasks = container.get(TOKENS.BACKGROUND_TASK_MANAGER);
-  const liveHandlers = container.get(TOKENS.TELEGRAM_LIVE_HANDLERS);
-  const postStartup = container.get(TOKENS.TELEGRAM_POST_STARTUP_TASKS);
 
-  let telegramStartAttempted = false;
+  let platformStartAttempted = false;
   let stopPromise: Promise<void> | undefined;
   const stop = (): Promise<void> => {
     stopPromise ??= (async () => {
@@ -51,7 +46,7 @@ export const startApp = async (): Promise<void> => {
       };
       await attempt(driver.stop);
       await attempt(backgroundTasks.shutdown);
-      if (telegramStartAttempted) await attempt(telegram.stop);
+      if (platformStartAttempted) await attempt(platform.stop);
       await attempt(() => {
         db.$client.close();
       });
@@ -100,9 +95,9 @@ export const startApp = async (): Promise<void> => {
     logger.withFields({ sessions: pipeline.getRenderedChats().length }).log('Cold start complete');
 
     driverInput.attach(driver);
-    liveHandlers.start();
-    telegramStartAttempted = true;
-    await telegram.start();
+    platform.startIngress();
+    platformStartAttempted = true;
+    await platform.start();
     driverInput.activate();
     backgroundTasks.recoverTasks();
 
@@ -110,7 +105,7 @@ export const startApp = async (): Promise<void> => {
       driverInput.handleEvent(chatId, context);
 
     logger.log('Cahciua is running');
-    await postStartup.run();
+    await platform.runPostStartup();
   } catch (error) {
     process.removeListener('SIGINT', handleSignal);
     process.removeListener('SIGTERM', handleSignal);

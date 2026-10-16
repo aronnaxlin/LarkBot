@@ -3,44 +3,34 @@ import { signal } from 'alien-signals';
 
 import { createCompactionController } from './compaction-controller';
 import { wasToolLoopInterrupted } from './context';
+import type { DriverPlatform } from './platform';
 import { createPrimaryTools } from './primary-tools';
 import { createRunner } from './runner';
 import { createReplyScheduler } from './scheduler';
-import type { SendMessageAttachment } from './tools';
 import type { CompactionSessionMeta, DriverConfig, ProbeResponseV2, TurnResponseV2 } from './types';
 import { executeWakeup } from './wakeup';
 import type { ActiveTaskInfo } from '../background-task/types';
 import type { RuntimeConfig } from '../config/config';
 import type { LlmEndpoint } from '../llm/types';
 import type { RenderedContext } from '../rendering/types';
-import type { Attachment } from '../telegram/message/types';
-import type { BanSpammerResult } from '../telegram/moderation-types';
 
 export { mergeContext } from './merge';
 export { renderLateBindingPrompt, renderSystemPrompt } from './prompt';
+export type { DriverPlatform } from './platform';
 export type { DriverConfig } from './types';
 export type { TurnResponseV2, ProbeResponseV2 } from './types';
 
-export const createDriver = (config: DriverConfig, deps: {
+// Platform capabilities are spread flat into deps (see DriverPlatform).
+export const createDriver = (config: DriverConfig, deps: DriverPlatform & {
   loadTurnResponses: (chatId: string, afterMs?: number) => Promise<TurnResponseV2[]>;
   persistTurnResponse: (chatId: string, tr: TurnResponseV2) => Promise<void>;
   persistProbeResponse: (chatId: string, probe: ProbeResponseV2) => Promise<void>;
-  sendMessage: (chatId: string, text: string, replyToMessageId?: number, attachments?: SendMessageAttachment[]) => Promise<{ messageId: number; date: number }>;
-  banSpammer: (chatId: string, messageId: number) => Promise<BanSpammerResult>;
-  setMessageReaction: (chatId: string, messageId: number, emoji: string | undefined) => Promise<void>;
-  sendTypingAction: (chatId: string) => Promise<void>;
-  // Called when a chat enters (true) / leaves (false) its debounce window, so the
-  // host can run an active typing poll for large supergroups only while waiting.
-  onDebounceStateChange: (chatId: string, isDebouncing: boolean) => void;
   loadCompaction: (chatId: string) => CompactionSessionMeta | null;
   loadLastProbeTime: (chatId: string) => number;
   persistCompaction: (chatId: string, meta: CompactionSessionMeta) => void;
   setCompactCursor: (chatId: string, cursorMs: number) => RenderedContext;
   getChatTitle: (chatId: string) => string | undefined;
   runtimeConfig: RuntimeConfig;
-  loadMessageAttachments: (chatId: string, messageId: number) => Attachment[] | undefined;
-  messageExists: (chatId: string, messageId: number) => boolean;
-  downloadMessageMedia: (chatId: string, messageId: number) => Promise<Buffer | undefined>;
   readOldMessages: (chatId: string, messageIds: string[]) => Promise<string> | string;
   resolveModel: (name: string) => LlmEndpoint;
   backgroundTask: {
@@ -135,6 +125,8 @@ export const createDriver = (config: DriverConfig, deps: {
           await executeWakeup({
             chatId,
             chatConfig,
+            currentChannel: deps.name,
+            turnBudget: chatConfig.primary.turnBudget,
             contextAtStart,
             currentContext: rc,
             cursorMs: cursorMs(),

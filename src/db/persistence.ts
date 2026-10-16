@@ -129,7 +129,7 @@ export const persistMessageDelete = (db: DB, del: IngressTelegramMessageDelete) 
     .run();
 };
 
-export const persistEvent = (db: DB, event: PipelineEvent) => {
+const eventValues = (event: PipelineEvent): typeof events.$inferInsert => {
   const base = {
     chatId: event.chatId,
     type: event.type,
@@ -147,35 +147,63 @@ export const persistEvent = (db: DB, event: PipelineEvent) => {
       finalSummary: event.finalSummary,
       hasFullOutput: event.hasFullOutput,
     };
-    db.insert(events).values({ ...base, runtimeData }).run();
-  } else if (event.type === 'delete') {
-    db.insert(events).values({
-      ...base,
-      messageIds: event.messageIds,
-    }).run();
-  } else if (event.type === 'service') {
-    db.insert(events).values({
+    return { ...base, runtimeData };
+  }
+  if (event.type === 'delete') return { ...base, messageIds: event.messageIds };
+  if (event.type === 'service') {
+    return {
       ...base,
       sender: event.actor ?? null,
       senderId: event.actor?.id ?? null,
       serviceAction: event.action,
-    }).run();
-  } else {
-    const plainText = contentToPlainText(event.content);
-    db.insert(events).values({
-      ...base,
-      messageId: event.messageId,
-      senderId: event.sender?.id ?? null,
-      text: plainText || null,
-      sender: event.sender ?? null,
-      content: event.content.length > 0 ? event.content : null,
-      attachments: event.attachments.length > 0 ? event.attachments : null,
-      replyToMessageId: event.type === 'message' ? (event.replyToMessageId ?? null) : null,
-      forwardInfo: event.type === 'message' ? (event.forwardInfo ?? null) : null,
-      isSelfSent: event.type === 'message' ? (event.isSelfSent ?? null) : null,
-    }).run();
+    };
   }
+  const plainText = contentToPlainText(event.content);
+  return {
+    ...base,
+    messageId: event.messageId,
+    senderId: event.sender?.id ?? null,
+    text: plainText || null,
+    sender: event.sender ?? null,
+    content: event.content.length > 0 ? event.content : null,
+    attachments: event.attachments.length > 0 ? event.attachments : null,
+    replyToMessageId: event.type === 'message' ? (event.replyToMessageId ?? null) : null,
+    forwardInfo: event.type === 'message' ? (event.forwardInfo ?? null) : null,
+    isSelfSent: event.type === 'message' ? (event.isSelfSent ?? null) : null,
+  };
 };
+
+export const persistEvent = (db: DB, event: PipelineEvent): void => {
+  db.insert(events).values(eventValues(event)).run();
+};
+
+/**
+ * Insert an event guarded by a platform delivery key. Returns false when a row
+ * with the same (chatId, dedupKey) already exists, so concurrent or restarted
+ * redeliveries can never produce a second row.
+ */
+export const persistDedupedEvent = (db: DB, event: PipelineEvent, dedupKey: string): boolean => {
+  const result = db.insert(events)
+    .values({ ...eventValues(event), dedupKey })
+    .onConflictDoNothing({ target: [events.chatId, events.dedupKey] })
+    .run();
+  return result.changes > 0;
+};
+
+export const hasEventDedupKey = (db: DB, chatId: string, dedupKey: string): boolean =>
+  db.select({ id: events.id })
+    .from(events)
+    .where(and(eq(events.chatId, chatId), eq(events.dedupKey, dedupKey)))
+    .limit(1)
+    .get() != null;
+
+/** Existence check against canonical message events, for platforms without a `messages` archive. */
+export const canonicalMessageExists = (db: DB, chatId: string, messageId: string): boolean =>
+  db.select({ id: events.id })
+    .from(events)
+    .where(and(eq(events.chatId, chatId), eq(events.type, 'message'), eq(events.messageId, messageId)))
+    .limit(1)
+    .get() != null;
 
 type EventRow = typeof events.$inferSelect;
 

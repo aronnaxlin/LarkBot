@@ -12,7 +12,7 @@ export const registerPipeline = ({ get, register }: Registrar): void => {
       chatIds.map(id => [id, new Set(resolveChatConfig(config, id).blockedUserIds)] as const),
     );
     return createPipeline({
-      botUserId: get(TOKENS.TELEGRAM_CLIENTS).bot.botUserId(),
+      botUserId: get(TOKENS.PLATFORM_IDENTITY).botUserId(),
       contactNames: loadContacts(get(TOKENS.LOGGER)),
     }, chatId => blockedUsers.get(chatId));
   });

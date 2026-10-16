@@ -5,6 +5,7 @@ npm-debug.log*
 yarn-debug.log*
 
 # Local data (DB, session, etc.)
+.config/
 data/
 *.db
 yarn-error.log*

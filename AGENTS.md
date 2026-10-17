@@ -2,7 +2,7 @@
 
 ## Project Direction And Scope
 
-LarkBot is a private, Feishu/Lark-first adaptation of [Cahciua](https://github.com/Menci/Cahciua), with the original author's permission. Preserve upstream attribution and history. See [README.md](README.md) and [project discussion notes](docs/项目讨论记录.md) for goals and decision status; proposals in those notes are not implementation requirements unless explicitly adopted.
+LarkBot is an open-source (MIT), Feishu/Lark-first adaptation of [Cahciua](https://github.com/Menci/Cahciua), which is MIT-licensed by Menci. Preserve upstream attribution and history. See [README.md](README.md) and [project discussion notes](docs/项目讨论记录.md) for goals and decision status; proposals in those notes are not implementation requirements unless explicitly adopted.
 
 - Build a group-chat participant with personality and per-person memory, not a productivity assistant. It may speak, react, decline, or remain silent, including after tool use.
 - Reuse the inherited persistence, context pipeline, model transports, tools, and compaction. Make focused changes; do not redesign the architecture merely because a file is touched.
@@ -238,6 +238,6 @@ Conventional Commits. Keep changes focused and update architectural docs in the 
 
 ## Upstream And Ports
 
-`origin` is the private LarkBot repository; `upstream` is `Menci/Cahciua`. There is no configured Edelweiss downstream workflow. Do not create remotes, synchronize repositories, or open upstream PRs unless requested.
+`origin` is the public LarkBot repository (`aronnaxlin/LarkBot`, MIT); `upstream` is `Menci/Cahciua`. There is no configured Edelweiss downstream workflow. Do not create remotes, synchronize repositories, or open upstream PRs unless requested.
 
 Preserve source authorship and reference source commits when porting changes. Original work follows the Commit Identity rules above. Evaluate ports against LarkBot's goals rather than inherited upstream feature bans; do not import another deployment's persona, secrets, or infrastructure configuration. Keep unrelated changes out of the same commit.

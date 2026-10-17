@@ -4,7 +4,7 @@ import type { ConversationEntry } from '../../unified-api/types';
 
 const DECIDE_TOOL_NAME = 'decide';
 
-type DecideAction = 'send_message' | 'no_action';
+type DecideAction = 'send_message' | 'react_only' | 'no_action';
 
 interface DecideArgs {
   should_act: DecideAction;
@@ -14,17 +14,18 @@ interface DecideArgs {
 export const createDecideTool = (): CahciuaTool => createTool({
   name: DECIDE_TOOL_NAME,
   description:
-    'Submit your prediction whether the chatbot will immediately perform new actions or send new messages to the chatroom.',
+    'Decide whether the chatbot SHOULD act now, based on the conversation, its personality, and how much it has already said — not whether it would feel like talking.',
   parameters: {
     type: 'object',
     properties: {
       should_act: {
         type: 'string',
-        enum: ['send_message', 'no_action'],
+        enum: ['send_message', 'react_only', 'no_action'],
         description:
-          '`send_message`: You predict that the chatbot will immediately perform new actions or send new messages to the chatroom. '
-          + 'This only wakes the chatbot; it may still decide to react only or stay silent.\n'
-          + '`no_action`: You predict that the chatbot will keep silent (no message, no reaction, no tool call) at this turn.',
+          '`send_message`: Acting now is warranted; wake the chatbot and let it choose between replying, reacting only, or ending silently. '
+          + 'Use it when the chatbot can add something: a real answer, a fresh joke, a needed correction, or when it is directly addressed (@-mentioned, quote-replied, or called by name).\n'
+          + '`react_only`: The chatbot should acknowledge the room with a reaction and nothing more. Primary runs with only `react` and `end_turn`; it cannot send a message this turn.\n'
+          + '`no_action`: The chatbot should stay out of it this round: nothing new to add, the message was meant for someone else, or it has already been talking more than the room needs.',
       },
       reason: {
         type: 'string',
@@ -37,7 +38,7 @@ export const createDecideTool = (): CahciuaTool => createTool({
 });
 
 const isDecideAction = (value: unknown): value is DecideAction =>
-  value === 'send_message' || value === 'no_action';
+  value === 'send_message' || value === 'react_only' || value === 'no_action';
 
 export const extractDecideResult = (entries: ConversationEntry[]): DecideArgs | null => {
   for (const entry of entries) {

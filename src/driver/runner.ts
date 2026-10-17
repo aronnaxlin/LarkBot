@@ -34,6 +34,9 @@ export interface StepLoopParams extends Omit<CallModelStepParams, 'entries' | 's
   entries: ConversationEntry[];
   budget: TurnBudget;
   budgetUsed?: TurnBudgetUsage;
+  // A react_only turn closes after this step even if a tool result asks for
+  // follow-up (see TurnLoopParams).
+  reactOnly?: boolean;
   deadlineAtMs: number;
   onStepComplete: (
     stepEntries: ConversationEntry[],

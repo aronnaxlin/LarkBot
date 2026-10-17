@@ -48,6 +48,9 @@ export interface RenderedContextSegment {
   mentionsMe?: boolean;
   // Reply-to target is a message sent by this bot
   repliesToMe?: boolean;
+  // Sender is a bot account other than this one (rendered `bot="true"`).
+  // Self messages carry `isMyself` instead, even though they are also a bot.
+  isBot?: boolean;
   // Segment is a runtime event (e.g. background task completion). Runtime events
   // wake scheduling but still pass through the mandatory probe gate.
   isRuntimeEvent?: boolean;

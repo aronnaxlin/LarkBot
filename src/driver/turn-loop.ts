@@ -11,6 +11,10 @@ export { DEFAULT_TURN_BUDGET } from './turn-budget';
 // wrap-up step and never consume or get skipped by the work-call budget.
 export const PARTICIPATION_TOOL_NAMES: ReadonlySet<string> = new Set(['send_message', 'react', 'end_turn']);
 
+// Probe `react_only` activation: primary may acknowledge with a reaction or
+// end silently, but cannot send a message or run work tools this turn.
+export const REACT_ONLY_TOOL_NAMES: ReadonlySet<string> = new Set(['react', 'end_turn']);
+
 export const countParticipationCalls = (entries: ConversationEntry[]): number =>
   extractToolCalls(entries).filter(call => call.name === 'send_message' || call.name === 'react').length;
 
@@ -54,6 +58,9 @@ export interface TurnLoopParams {
   budget: TurnBudget;
   // Usage already consumed by earlier TRs of an interrupted chain.
   budgetUsed?: TurnBudgetUsage;
+  // A react_only turn closes after its first step even when a tool result
+  // asks for follow-up, so a continuation can never regain the full tool set.
+  reactOnly?: boolean;
   deadlineAtMs: number;
   onStepComplete: (
     stepEntries: ConversationEntry[],
@@ -107,10 +114,13 @@ export const runTurnLoop = async (
     const anyRequiresFollowUp = toolResults.some(result => result.requiresFollowUp);
     const endTurnCalled = extractToolCalls(modelStep.modelEntries).some(call => call.name === 'end_turn');
     // end_turn is explicit: it closes the turn even beside follow-up results.
-    // The wrap-up is the last step. Out of time, the turn ends silently.
+    // A react_only turn is one step by construction: `react` reports follow-up,
+    // but there is no message or work tool to wait for. The wrap-up is the last
+    // step. Out of time, the turn ends silently.
     let closeReason: string | undefined;
     if (anyRequiresFollowUp) {
       if (endTurnCalled) closeReason = 'end_turn';
+      else if (params.reactOnly) closeReason = 'react-only';
       else if (wrapUp) closeReason = 'wrap-up';
       else if (!hasTimeForModelCall()) closeReason = 'deadline';
     }

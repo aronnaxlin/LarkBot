@@ -7,6 +7,7 @@ import type { DriverPlatform } from './platform';
 import { createPrimaryTools } from './primary-tools';
 import { createRunner } from './runner';
 import { createReplyScheduler } from './scheduler';
+import { isTransientModelError } from './transient-error';
 import type { CompactionSessionMeta, DriverConfig, ProbeResponseV2, TurnResponseV2 } from './types';
 import { executeWakeup } from './wakeup';
 import type { ActiveTaskInfo } from '../background-task/types';
@@ -120,7 +121,10 @@ export const createDriver = (config: DriverConfig, deps: DriverPlatform & {
       lastTurnInterrupted: lastTRInterrupted,
       failedContext: failedRc,
       onDebounceStateChange: deps.onDebounceStateChange,
-      execute: async contextAtStart => {
+      log,
+      execute: async (contextAtStart, retry) => {
+        // Survives a primary failure so the retry need not rerun probe.
+        let probeActivation = retry?.probeActivation;
         try {
           await executeWakeup({
             chatId,
@@ -141,11 +145,15 @@ export const createDriver = (config: DriverConfig, deps: DriverPlatform & {
             runner,
             getLastProcessedMs: lastProcessedMs,
             setLastProcessedMs: lastProcessedMs,
+            probeActivation,
+            onProbeActivated: activation => { probeActivation = activation; },
             log,
           });
+          return { kind: 'done' };
         } catch (error) {
-          log.withError(error).withFields({ chatId }).error('LLM call failed');
-          failedRc(contextAtStart);
+          const transient = isTransientModelError(error);
+          log.withError(error).withFields({ chatId, transient }).error('LLM call failed');
+          return transient ? { kind: 'transient-failure', probeActivation } : { kind: 'failure' };
         } finally {
           try {
             const responses = await deps.loadTurnResponses(chatId, cursorMs());

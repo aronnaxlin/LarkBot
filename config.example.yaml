@@ -65,11 +65,14 @@ chats:
         maxToolRounds: 2
         maxToolCalls: 4
         maxParticipationCalls: 3 # combined sends/reactions; end_turn is exempt
-        deadlineMs: 15000 # per wake-up; does not abort an in-flight tool
+        deadlineMs: 15000 # from primary start, probe excluded; does not abort an in-flight tool
         minModelCallMs: 2000 # must be less than deadlineMs
     probe:
       # Probe is mandatory. Omit model to reuse the primary endpoint.
       model: "probe"
+      # Probe HTTP bound, independent of the primary deadline; the model's
+      # timeoutSec applies if lower. Timeouts/5xx/network errors are retried.
+      timeoutMs: 15000
     systemFiles:
       - "prompts/IDENTITY.md"
       - "prompts/style-enforcements.md"

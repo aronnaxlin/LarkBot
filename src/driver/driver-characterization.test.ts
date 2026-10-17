@@ -6,6 +6,7 @@ vi.mock('../llm/call', () => ({ callLlm: vi.fn() }));
 import { createDriver } from './index';
 import { createRunner } from './runner';
 import { createTool } from './tools/create-tool';
+import { DEFAULT_PROBE_TIMEOUT_MS } from './turn-budget';
 import { DEFAULT_TURN_BUDGET } from './turn-loop';
 import type { ProbeResponseV2, TurnBudget, TurnResponseV2 } from './types';
 import { interruptedChainUsage } from './wakeup';
@@ -47,6 +48,7 @@ const makeChatConfig = (): ResolvedChatConfig => ({
   compaction: { maxContextEstTokens: 200000, workingWindowEstTokens: 8000 },
   probe: {
     model: { apiBaseUrl: 'mock', apiKey: 'key', model: 'mock-probe', apiFormat: 'openai-chat' },
+    timeoutMs: DEFAULT_PROBE_TIMEOUT_MS,
   },
   imageToText: { enabled: false, maxConcurrency: 1 },
   animationToText: { enabled: false, maxFrames: 0, maxConcurrency: 1 },
@@ -225,6 +227,140 @@ describe('Driver probe gate characterization', () => {
     expect(onDebounceStateChange).not.toHaveBeenCalled();
     expect(mockCallLlm).not.toHaveBeenCalled();
     expect(persistedProbes).toHaveLength(1);
+  });
+});
+
+describe('Probe timeout and wake-up liveness', () => {
+  afterEach(() => {
+    vi.useRealTimers();
+  });
+
+  // Wake-ups mix fake timers (debounce, backoff) with real I/O (prompt files),
+  // so step fake time and yield to the real event loop alternately.
+  const advanceUntil = async (condition: () => boolean): Promise<void> => {
+    for (let i = 0; i < 200 && !condition(); i++) {
+      await vi.advanceTimersByTimeAsync(500);
+      await new Promise<void>(resolve => setImmediate(resolve));
+    }
+  };
+
+  const activate = () => ({
+    entries: toolCallEntries('probe', 'decide', JSON.stringify({ should_act: 'send_message', reason: 'probe-reason-marker' })),
+    usage: makeUsage(),
+  });
+
+  it('bounds probe by probe.timeoutMs and starts the primary deadline after probe', async () => {
+    vi.useFakeTimers({ toFake: ['Date'] });
+    const persistedTurns: TurnResponseV2[] = [];
+    mockCallLlm.mockImplementation(async config => {
+      if (config.model !== 'mock-probe') return { entries: toolCallEntries('end', 'end_turn'), usage: makeUsage() };
+      // A slow but successful probe must not shorten the primary budget.
+      vi.setSystemTime(Date.now() + 12_000);
+      return activate();
+    });
+    const chatConfig = makeChatConfig();
+    chatConfig.probe.model.timeoutSec = 60;
+    const driver = createDriver({ chatIds: ['probe-timeout'], resolveChatConfig: () => chatConfig }, makeDriverDeps({
+      persistTurnResponse: async (_chatId, turn) => { persistedTurns.push(turn); },
+    }));
+    activeDrivers.push(driver);
+    driver.handleEvent('probe-timeout', buildExternalContext());
+
+    await vi.waitFor(() => expect(persistedTurns).toHaveLength(1), { timeout: 2000 });
+    expect(mockCallLlm.mock.calls[0]![0]).toMatchObject({ model: 'mock-probe', timeoutSec: DEFAULT_PROBE_TIMEOUT_MS / 1000 });
+    const primaryTimeoutSec = mockCallLlm.mock.calls[1]![0].timeoutSec!;
+    expect(primaryTimeoutSec).toBeGreaterThan(DEFAULT_TURN_BUDGET.deadlineMs / 1000 - 1);
+    expect(primaryTimeoutSec).toBeLessThanOrEqual(DEFAULT_TURN_BUDGET.deadlineMs / 1000);
+  });
+
+  it('retries a timed-out probe on the same context instead of waiting for new input', async () => {
+    vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout', 'Date'] });
+    const persistedTurns: TurnResponseV2[] = [];
+    let probeCalls = 0;
+    mockCallLlm.mockImplementation(async config => {
+      if (config.model !== 'mock-probe') return { entries: toolCallEntries('end', 'end_turn'), usage: makeUsage() };
+      probeCalls++;
+      if (probeCalls === 1) throw new Error('chat request timed out after 15s');
+      return activate();
+    });
+    startDriver('probe-retry', makeDriverDeps({
+      persistTurnResponse: async (_chatId, turn) => { persistedTurns.push(turn); },
+    })).handleEvent('probe-retry', buildExternalContext());
+
+    await advanceUntil(() => persistedTurns.length > 0);
+    expect(persistedTurns).toHaveLength(1);
+    expect(probeCalls).toBe(2);
+  });
+
+  it('retries a transiently failed primary straight away, reusing the probe activation', async () => {
+    vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout', 'Date'] });
+    const persistedTurns: TurnResponseV2[] = [];
+    const persistedProbes: ProbeResponseV2[] = [];
+    let primaryCalls = 0;
+    mockCallLlm.mockImplementation(async config => {
+      if (config.model === 'mock-probe') return activate();
+      primaryCalls++;
+      if (primaryCalls === 1) throw new Error('Chat Completions API 503: busy');
+      return { entries: toolCallEntries('end', 'end_turn'), usage: makeUsage() };
+    });
+    startDriver('primary-retry', makeDriverDeps({
+      persistTurnResponse: async (_chatId, turn) => { persistedTurns.push(turn); },
+      persistProbeResponse: async (_chatId, probe) => { persistedProbes.push(probe); },
+    })).handleEvent('primary-retry', buildExternalContext());
+
+    await advanceUntil(() => persistedTurns.length > 0);
+    expect(persistedTurns).toHaveLength(1);
+    expect(primaryCalls).toBe(2);
+    expect(mockCallLlm.mock.calls.filter(([config]) => config.model === 'mock-probe')).toHaveLength(1);
+    expect(persistedProbes).toHaveLength(1);
+    // The retried primary still receives the original probe reason.
+    expect(JSON.stringify(mockCallLlm.mock.calls[1]![1])).toContain('probe-reason-marker');
+    expect(JSON.stringify(mockCallLlm.mock.calls[2]![1])).toContain('probe-reason-marker');
+  });
+
+  it('resumes a mid-chain transient failure without probe and with the chain budget carried over', async () => {
+    vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout', 'Date'] });
+    const persistedTurns: TurnResponseV2[] = [];
+    const readOld = (callId: string) => ({
+      entries: toolCallEntries(callId, 'read_old_messages', JSON.stringify({ message_ids: ['1'] })),
+      usage: makeUsage(),
+    });
+    let primaryCalls = 0;
+    mockCallLlm.mockImplementation(async config => {
+      if (config.model === 'mock-probe') return activate();
+      primaryCalls++;
+      if (primaryCalls === 1) return readOld('read-1');
+      if (primaryCalls === 2) throw new Error('Messages API 529: overloaded');
+      if (primaryCalls === 3) return readOld('read-2');
+      return { entries: toolCallEntries('end', 'end_turn'), usage: makeUsage() };
+    });
+    startDriver('mid-chain-retry', makeDriverDeps({
+      loadTurnResponses: async () => [...persistedTurns],
+      persistTurnResponse: async (_chatId, turn) => { persistedTurns.push(turn); },
+      readOldMessages: () => '<message id="1">old</message>',
+    })).handleEvent('mid-chain-retry', buildExternalContext());
+
+    await advanceUntil(() => persistedTurns.length >= 3);
+    expect(persistedTurns).toHaveLength(3);
+    const models = mockCallLlm.mock.calls.map(([config]) => config.model);
+    expect(models).toEqual(['mock-probe', 'mock-primary', 'mock-primary', 'mock-primary', 'mock-primary']);
+    const toolNames = (call: number) => mockCallLlm.mock.calls[call]![3]?.map(schema => schema.name);
+    expect(toolNames(3)).toContain('read_old_messages');
+    // Round 1 before the failure plus round 2 in the retry exhaust
+    // maxToolRounds = 2, so the next step is the participation-only wrap-up.
+    expect(toolNames(4)).toEqual(['send_message', 'react', 'end_turn']);
+    expect(persistedTurns[2]!.entries.some(entry => entry.kind === 'toolResult' && entry.requiresFollowUp)).toBe(false);
+  });
+
+  it('does not retry a permanent model error', async () => {
+    vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout', 'Date'] });
+    mockCallLlm.mockRejectedValue(new Error('Chat Completions API 401: bad key'));
+    startDriver('permanent-error', makeDriverDeps()).handleEvent('permanent-error', buildExternalContext());
+
+    await advanceUntil(() => mockCallLlm.mock.calls.length > 0);
+    // Long enough for every default retry delay to elapse.
+    await advanceUntil(() => false);
+    expect(mockCallLlm).toHaveBeenCalledTimes(1);
   });
 });
 

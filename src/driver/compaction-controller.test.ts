@@ -55,7 +55,7 @@ describe('createCompactionController', () => {
         blockedUserIds: [],
         debounce: { initialDelayMs: 1, typingExtendMs: 1, maxDelayMs: 1 },
         compaction: { maxContextEstTokens: 1, workingWindowEstTokens: 1 },
-        probe: { model: { apiBaseUrl: 'mock', apiKey: 'key', model: 'probe', apiFormat: 'openai-chat' } },
+        probe: { model: { apiBaseUrl: 'mock', apiKey: 'key', model: 'probe', apiFormat: 'openai-chat' }, timeoutMs: 1_000 },
         imageToText: { enabled: false, maxConcurrency: 1 },
         animationToText: { enabled: false, maxFrames: 1, maxConcurrency: 1 },
         customEmojiToText: { enabled: false, maxFrames: 1, maxConcurrency: 1 },

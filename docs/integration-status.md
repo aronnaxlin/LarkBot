@@ -7,7 +7,7 @@ A and B's changes have been combined in this worktree. A's follow-up integration
 ## Coordinator corrections
 
 - Expired primary entry now throws into the scheduler's failed-context guard instead of returning with an open continuation (avoids a hot loop). Missing context for an open continuation also throws.
-- Probe HTTP timeout now reserves the minimum primary-call time within the wake-up deadline.
+- Probe HTTP timeout now reserves the minimum primary-call time within the wake-up deadline. (Superseded 2026-10-17; see Turn liveness below.)
 - Each not-yet-started side effect checks the deadline; an already-running tool is never abandoned. Remaining calls get persisted skipped results, and `end_turn` stays available.
 - New `primary.turnBudget.maxParticipationCalls` (default 3) bounds combined send/reaction attempts across the persisted interruption chain. Work-call budget remains separate. This is not a hard wall-clock limit on an in-flight tool.
 - Feishu API errors retain numeric code/status only, not free-form server/network messages that might echo secrets.
@@ -22,7 +22,7 @@ After the user installed system `rlottie 0.2-5` (libpng already present), the co
 
 - Native dependency blocker resolved by the user's system installation and the coordinator's successful rebuild; all offline checks now pass.
 - Platform wording/format integration, stale fallback removal, README status, config examples, and AGENTS paths/startup/allowlist/budget/monitor instructions are reconciled. The original A/B implementation notes are explicitly marked as historical handoff snapshots.
-- Probe timeout is capped in code; add a dedicated mocked probe timeout regression before claiming that specific path has direct coverage. Budget configuration has a regression test.
+- Probe timeout is capped in code and now has a mocked regression (`driver-characterization.test.ts` › `Probe timeout and wake-up liveness`). Budget configuration has a regression test.
 - Consider full-history interruption accounting across compaction and a chain-level deadline; current deadline remains per wake-up.
 - Branch committed and pushed with user authorization; PR #1 is open, not merged. The integration worktree temporarily symlinks node_modules and generated types to A's worktree; these local links must never be staged or committed.
 
@@ -86,3 +86,45 @@ is lost is the runner's "requirement not met, retry" safety net.
   are unaffected.
 - `read_image` is registered even where the platform cannot fetch attachments,
   so the model spends a tool call before learning that. It fails gracefully.
+
+## Turn liveness (2026-10-17)
+
+Evidence from the 2026-10-16 night run: probe (~35k input tokens, mostly
+cached) had p50 7 s, p90 11 s, max 17 s; about 31 probe calls were aborted at
+the shared 20 s wake-up deadline, and after a slow successful probe primary was
+left 2–13 s and timed out too. Every failure set `failedRc`, so the wake-up was
+lost until someone wrote again (one question waited 20 minutes). A WiFi switch
+also left the Feishu WebSocket half-open for 10 minutes.
+
+Changes (offline-tested only; live behavior not yet observed):
+
+- `primary.turnBudget.deadlineMs` is now measured from primary start. Probe is
+  bounded by `chats.<id>.probe.timeoutMs` (default 15 s), capped by the probe
+  endpoint `timeoutSec`.
+- Transport timeouts, undici `fetch failed`/`terminated`, socket/timeout
+  error codes in the `cause` chain (ECONNRESET, ECONNREFUSED, ETIMEDOUT, EPIPE,
+  UND_ERR_*), and HTTP 408/409/425/429/5xx are transient: the scheduler retries
+  the same context after 5 s and then 20 s, then falls back to `failedRc`.
+  Other errors (4xx config errors, forced-choice exhaustion, persistence
+  errors) go straight to `failedRc`. A primary call aborted because its timeout
+  was capped to the remaining turn deadline counts as deadline expiry
+  (permanent), not as a provider failure.
+- A retry after primary failed reuses the probe activation and goes straight to
+  primary; probe reruns only when probe itself failed. A mid-chain failure
+  resumes as a continuation with the chain budget carried over.
+- New external input during the backoff supersedes the retry with a debounced
+  wake-up and resets the retry count. Compaction, edits, deletes, metadata and
+  self-events replace the RC without superseding it: the retry stays live and
+  runs against the current RC.
+- Feishu `WSClient` sets `wsConfig.pingTimeout: 10`, so a socket with no pong
+  or inbound frame within 10 s of a ping is terminated and reconnected.
+- `probe.timeoutMs` is validated to 1 000–120 000 ms.
+
+Open: one attempt can take up to probe timeout plus primary deadline (30 s at
+defaults: 15 s + 15 s) plus any in-flight tool. Three attempts and the 5 s and
+20 s backoffs mean a failing provider abandons a wake-up after about 115 s in
+the worst case; new input resets the count, so a busy chat keeps retrying.
+A primary that hits its own deadline is not retried and waits for new input.
+Error classification matches transport error messages, so a transport message
+change would silently turn a transient error permanent (tests pin the current
+strings and shapes).

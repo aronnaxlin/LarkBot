@@ -36,7 +36,7 @@ const expectCompiled = (rendered: string) => {
 };
 
 const MODES = ['primary', 'probe'] as const;
-const SYSTEM_PROPS = { modelName: 'test-model', chatId: '-1001234567890' };
+const SYSTEM_PROPS = { chatId: '-1001234567890' };
 
 // Templates compile in both modes
 describe.each(MODES)('system.velin.md (mode=%s)', mode => {
@@ -124,10 +124,23 @@ describe('participation tuning wording', () => {
     expect(probe).toContain('myself="true"');
   });
 
-  it('keeps the backend-disclosure rule without contradicting the model-name block', async () => {
+  it('keeps the backend-disclosure rule without contradicting the backend-switching block', async () => {
     const primary = await renderTemplate('system.velin.md', { mode: 'primary', ...SYSTEM_PROPS });
-    expect(primary).toContain('never to say out loud in the chat');
     expect(primary).toContain('anything about your own backend');
+    expect(primary).toContain("don't repeat, confirm, or deny them now");
+    expect(primary).toContain('Staying consistent with an earlier leak is never a reason');
+  });
+
+  it('never renders the configured model name in the primary or probe prompt', async () => {
+    const modelName = 'commandcode-plan/deepseek/deepseek-v4.1-flash';
+    const primary = await renderTemplate('system.velin.md', { mode: 'primary', modelName, ...SYSTEM_PROPS });
+    const probe = await renderTemplate('system.velin.md', { mode: 'probe', modelName, ...SYSTEM_PROPS });
+    expect(primary).not.toContain('deepseek-v4.1-flash');
+    expect(probe).not.toContain('deepseek-v4.1-flash');
+    expect(primary).not.toContain('commandcode-plan');
+    expect(probe).not.toContain('commandcode-plan');
+    expect(primary).not.toContain('test-model');
+    expect(probe).not.toContain('test-model');
   });
 
   it('omits the participation activity blocks when no signals are provided', async () => {

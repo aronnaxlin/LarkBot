@@ -1,7 +1,7 @@
 # LarkBot
 
 > [!WARNING]
-> Work in progress. LarkBot is under active development and is not ready for use. A first Feishu/Lark adapter and bounded, optional participation are implemented and offline-tested, but have not been validated against a live Feishu application. This is not a production-ready release.
+> Work in progress. LarkBot is under active development and is not ready for use. A Feishu/Lark adapter with bounded, optional participation is implemented and has run in a real private group (live runs on 2026-10-16 and 2026-10-17). Long-term memory, a trusted maintainer list, and isolated Bash/browser access are still planned. This is not a production-ready release.
 
 LarkBot is a Feishu/Lark-first, LLM-driven group-chat bot for a small private community. It is meant to hang out in a group, with its own personality and memories—not to serve as a personal assistant or a productivity tool.
 

@@ -1,5 +1,68 @@
 # Integration status
 
+Current status: 2026-10-17, `main` at `a6a22fd`, PRs #1–#7 merged. The Feishu
+adapter runs in a real private group, and the participation policy from the
+[2026-10-16 night-run analysis](analysis/2026-10-16-night-run-participation.md)
+(PR #7) is in place.
+
+## Live Feishu runs (2026-10-16 and 2026-10-17)
+
+Runs happened on the night of 2026-10-16 and on 2026-10-17, under a systemd
+user unit, against a real group. Verified live:
+
+- ambient and @-mention ingress, quoted replies, and reactions;
+- synthetic self-events (the bot sees its own messages);
+- restart replay and dedup across several restarts;
+- WebSocket reconnect after a network loss (the `pingTimeout` watchdog);
+- `read_image` on Feishu images, after the primary endpoint's
+  `maxImagesAllowed` was raised (DeepSeek V4.1 Flash has native vision);
+- an outgoing `<at user_id="...">` mention that validated.
+
+The primary endpoint's `maxImagesAllowed` cap now leaves an
+`[image omitted: ...]` marker where it drops an image (PR #6), so a capped-out
+image no longer reads as "images are unsupported".
+
+Passive image alt text is still not wired for Feishu, so the model must call
+`read_image`.
+
+## Participation policy (2026-10-17, PR #7)
+
+The probe decides whether the bot should act, with three outcomes:
+`send_message` (wake primary), `react_only` (wake primary with only `react` and
+`end_turn`, closing after one step), and `no_action`. A human @, quote-reply or
+name-call comes first and is never suppressed; name-calls are judged by the
+model. Messages addressed to others get `no_action` unless they misstate the
+bot. Unaddressed chatter needs something new. With more than 10 of the bot's
+own messages in 10 minutes and no direct address, the probe picks `react_only`
+or `no_action`. Other bots render as `bot="true"` and are answered only when a
+human asked the bot to talk to that bot, at most 2 rounds. The backend
+(prompts, config, tool implementation, model/provider, deployment) is never
+disclosed, and the probe reason reaches primary as context, not an instruction.
+`prompts/IDENTITY.example.md` is the tracked persona template; the real
+`IDENTITY.md` stays deployment-local.
+
+## Known issues (2026-10-17)
+
+- `contact.user.get` returns `41050` "no user authority": the app's contact
+  data range (通讯录权限范围) does not include the group members. Display names
+  fall back to names seen earlier; `open_id` identities are unaffected.
+- Feishu retries undelivered events after about 5 min, 1 h and 6 h. A late
+  event carries an old `create_time`, so the model can read it as stale. A
+  rendered `received` hint is in progress.
+- The night-run `primary.turnBudget.deadlineMs` of 20000 truncated a few
+  multi-step `read_image` chains.
+- No passive image alt text on Feishu.
+- Compaction can truncate the history used for budget accounting.
+- Not implemented: the trusted maintainer list (in progress), per-person
+  long-term memory, Feishu CLI/Skills/MCP, isolated Bash and browser, and Jev
+  evaluation. See the README's planned direction.
+
+## Historical log (2026-10-16 to 2026-10-17)
+
+The sections below are the coordinator's running log, kept as historical
+snapshots. Their "offline-tested only" caveats were superseded by the live
+runs above; [Turn liveness](#turn-liveness-2026-10-17) remains current behavior.
+
 2026-10-16 — Work on `integration/feishu-participation`; PR: https://github.com/aronnaxlin/LarkBot/pull/1.
 
 A and B's changes have been combined in this worktree. A's follow-up integration was interrupted by the Claude session limit (reported reset: 22:30 Asia/Taipei); do not assume its integration/documentation tasks are complete. No model switch, real credentials, live Feishu connection, commit, or push was performed by the coordinating agent.
@@ -79,13 +142,11 @@ endpoints, for both the Probe (`{ name: 'decide' }`) and the primary turn
 (`'any'`). The model still calls the required tool without being forced; what
 is lost is the runner's "requirement not met, retry" safety net.
 
-### Still open
+### Still open at the time
 
-- `contact.user.get` returns `99991672` without the contact scope, so display
-  names fall back to the name seen in a mention. Stable `open_id` identities
-  are unaffected.
-- `read_image` is registered even where the platform cannot fetch attachments,
-  so the model spends a tool call before learning that. It fails gracefully.
+Both items are since resolved: the contact scope was granted (later superseded
+by the `41050` data-range issue), and `read_image` fetches Feishu images. See
+[Known issues (2026-10-17)](#known-issues-2026-10-17).
 
 ## Turn liveness (2026-10-17)
 
@@ -96,7 +157,8 @@ left 2–13 s and timed out too. Every failure set `failedRc`, so the wake-up wa
 lost until someone wrote again (one question waited 20 minutes). A WiFi switch
 also left the Feishu WebSocket half-open for 10 minutes.
 
-Changes (offline-tested only; live behavior not yet observed):
+Changes (the WebSocket reconnect was observed live on 2026-10-17; the timeout
+and retry behavior was offline-tested when written):
 
 - `primary.turnBudget.deadlineMs` is now measured from primary start. Probe is
   bounded by `chats.<id>.probe.timeoutMs` (default 15 s), capped by the probe

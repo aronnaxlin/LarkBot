@@ -6,6 +6,8 @@
 
 > 2026-10-17 补充（`feat/feishu-images`）：入站图片已接入 canonical 附件与 `read_image(file_id)` / `download_file`，见 §1.1、§2、§9.5。
 
+> 2026-10-17 联机验证：真实群聊里已跑通 @ 提及、图片 `read_image`、引用回复、表情、synthetic self-event、重启回放/去重和断线重连。通讯录昵称 API 对权限范围外的成员返回 `41050`，昵称回退为早前见过的名字；图片仍无被动描述。
+
 本文记录第一版飞书接入实际实现了什么、怎么配置、怎么手动联调，以及已知限制。调研背景见调研报告（`research-feishu-integration` 分支的 `docs/feishu-integration-research.md`）。
 
 ## 1. 范围
@@ -22,7 +24,7 @@
 - 发送 @：模型在 `send_message` 文本里写 `<at user_id="ou_...">名字</at>`，`src/feishu/post-content.ts` 校验后原样放进 `md` 元素（飞书 md 扩展语法）。open_id 必须是本群见过的参与者（本进程见过的发送者或被 @ 者，或 IC 中的历史发送者），否则工具报错；不支持 @所有人；代码块和行内代码里的标签按字面发送。飞书模式下 chatlog 的 `<message>` 带 `uid` 属性，供模型复制 open_id；Telegram 渲染不变。
 - Synthetic self-event：每次发送成功后，用服务端返回的 `message_id` 写入一条 `isSelfSent=true` 的 canonical 事件，再发布到 Pipeline，不唤醒 Driver。飞书不会把机器人自己的消息推回来，所以机器人只能通过这条路径看到自己说过的话。
 - 去重和崩溃恢复，见 §3。
-- 表情：为常用 Unicode emoji 做了 `emoji_type` 映射（含 😏 `SMIRK`、😎 `SMART`）。未映射的 emoji 直接报错，不会假装成功；移除表情需要本进程记录的 `reaction_id`，重启后无法移除或替换之前加的表情，同样会报错。
+- 表情：为常用 Unicode emoji 做了 `emoji_type` 映射（第一版 30 个，2026-10-17 又补约 37 个，含 😏 `SMIRK`、😎 `SMART`）。未映射的 emoji 直接报错，不会假装成功；移除表情需要本进程记录的 `reaction_id`，重启后无法移除或替换之前加的表情，同样会报错。
 
 ### 1.1 入站图片与 file_id
 
@@ -30,6 +32,7 @@
 - 图片不再产生 `[image]` 占位文本；解析失败（拿不到 key）时才保留占位符。
 - Rendering 按共享规则把附件渲染成 `<attachment type="photo" ... file-id="<message_id>:<index>"/>`（多图 post 每个图一个 index），模型把这个 `file-id` 传给 `read_image` / `download_file`。下载链路：`file-id` → `(message_id, index)` → 从已落库事件取第 index 个附件的 `image_key` → `GET /open-apis/im/v1/messages/{message_id}/resources/{image_key}?type=image`。共享下载器会校验 `0 <= index < attachments.length`，越界报平台无关的错误。
 - 下载在流式读取时 20 MB 截断（`readMessageResourceStream`），Content-Length 超限会在读流前直接拒绝，否则边读边计数；总读取超时 30 s，到点 destroy 流。超限/超时是本模块自己的错误，原样返回；流中途的传输错误会过一遍 `toApiError` 再返回模型，避免把请求细节带进工具结果。
+- 2026-10-17 联机验证：真实群聊图片已用 `read_image(file_id)` 成功读取；多图 post、尺寸与 MIME 未逐项核对。
 
 ### 未实现（后续工作）
 
@@ -94,8 +97,8 @@ chats:
 - 发送和回复：`im:message:send_as_bot`。
 - 撤回事件：`im:message` 或 `im:message:readonly`。
 - 表情：`im:message.reactions:write_only`（或 `im:message`）。
-- 下载消息里的图片 / 文件资源（`read_image(file_id)`、`download_file`）：`im:resource`。缺这个权限时资源接口会返回权限错误；本线没有联机验证过。
-- 昵称：`contact:user.base:readonly`（确切名称待验证；缺少时自动降级为 @ 名或 open_id）。
+- 下载消息里的图片 / 文件资源（`read_image(file_id)`、`download_file`）：`im:resource`。缺这个权限时资源接口会返回权限错误；已在 2026-10-17 联机读取真实图片。
+- 昵称：通讯录读取权限（`contact.user.get`，如 `contact:user.base:readonly`）。该权限已开通，但还必须把「通讯录权限范围」（contact data range）配成包含群成员：范围外的成员返回 `41050` "no user authority"，此时昵称回退为早前见过的名字，再没有则显示 open_id。
 - 事件订阅方式选“长连接”，订阅 `im.message.receive_v1`、`im.message.recalled_v1`。
 - 一个应用只能运行一个长连接消费者：不要同时运行第二个 LarkBot 进程或 `lark-cli event consume`，否则事件会被随机分到其中一个。
 
@@ -126,15 +129,15 @@ chats:
 
 ## 8. 未验证事项与限制
 
-- `src/feishu/sdk.ts` 已通过类型检查，但从未连接过真实服务。用到的接口有 `im.v1.message.create/reply`、`im.v1.messageReaction.create/delete`、`contact.v3.user.get`、`Client.request`（`/open-apis/bot/v3/info`）、`WSClient` 和 `EventDispatcher`。
+- `src/feishu/sdk.ts` 已通过类型检查，并已在 2026-10-17 联机使用。用到的接口有 `im.v1.message.create/reply`、`im.v1.messageReaction.create/delete`、`contact.v3.user.get`、`Client.request`（`/open-apis/bot/v3/info`）、`WSClient` 和 `EventDispatcher`。
 - 尚未确认 `FEISHU_DOMAIN` 的实际取值格式；值不符合 §4 中的格式时，启动会报错（错误信息不包含值）。
-- 机器人被 @ 时，`mentions[].id.open_id` 是否等于 `/bot/v3/info` 返回的 open_id：参考实现都按相等处理，需实测。
+- 机器人被 @ 时，`mentions[].id.open_id` 是否等于 `/bot/v3/info` 返回的 open_id：已在 2026-10-17 联机确认（@ 提及与 `mentionsMe` 正常）。
 - 收到的 post 中，`at` 元素按文档使用 `@_user_N` 占位符；代码同时兼容直接给出 open_id 的情况。
 - 文本消息里的 `[文本](url)` 链接按纯文本保留，不解析成链接节点。
 - 提示词仍写的是 Telegram（见 §9）。
 - 图片：`fileKey`（`image_key`）现在声明在共享的 `CanonicalAttachment` 和 `Attachment` 类型上；Telegram 不设置它，继续按 `(chatId, messageId)` 下载。
-- 图片下载：多图消息的每个 index 都可下载（共享下载器按 index 取附件）；飞书没有验证过真实图片的下载、尺寸和 MIME。
-- 入站图片能力已在 registrar 接好：`read_image(file_id)` / `download_file` 对飞书可用，但需要 `im:resource` 权限，且未联机验证。
+- 图片下载：多图消息的每个 index 都可下载（共享下载器按 index 取附件）；已在 2026-10-17 联机验证真实图片下载，尺寸和 MIME 未逐项核对。
+- 入站图片能力已在 registrar 接好：`read_image(file_id)` / `download_file` 对飞书可用，但需要 `im:resource` 权限；已在 2026-10-17 联机验证。
 - `send_message.attachments` 在飞书不暴露：`DriverPlatform.supportsOutboundAttachments` 只在 Telegram 平台为 true，飞书没有声明，工具 schema 里也就没有 `attachments`。
 - 被动图片描述未接：`imageToText` 的自动描述链路需要 ingress 在落库前下载图片、生成 `thumbnailWebp` 并调用 `imageToText.resolve`，目前 `src/feishu/ingress.ts` 没有媒体运行时依赖（见 §9.5）。
 - `ban_spammer` 的 `tg://` 公告等 Telegram 专属逻辑保持不变，飞书模式下不启用。
@@ -145,6 +148,6 @@ chats:
 
 1. **`src/driver/wakeup.ts` 的 `currentChannel`**（两处硬编码 `'telegram'`）。建议给 `executeWakeup` 增加参数 `currentChannel: string`，替换这两处 `currentChannel: 'telegram'`。`src/driver/index.ts` 调用时传入平台名，需要在 `createDriver` 的 deps 中加上 `platformName: DriverPlatform['name']`（`registrars/driver.ts` 中由 `platform.name` 提供）。本分支没有改 `wakeup.ts`，所以 deps 里暂时没有这个字段。
 2. **Driver 行为测试的类型补丁**：`src/driver/driver-characterization.test.ts` 和 `src/driver/probe-vs-primary.test.ts` 中，`sendMessage` mock 返回的 `messageId: 1` / `999` 是 number，类型上需要改成 `'1'` / `'999'`（多余的 `date` 字段可以留着）。这只影响 `tsc`，vitest 运行不受影响。其余 deps 字段名没变，`loadMessageAttachments`、`downloadMessageMedia`、`banSpammer` 只是变成了可选。
-3. **提示词**：`prompts/system.velin.md` 写的是 “Telegram group chat”、“Telegram-flavored Markdown” 和 `t.me` 链接前缀，`prompts/late-binding.velin.md` 写的是 “Telegram group chat”。建议按 `currentChannel` 分支：飞书输出的是 CommonMark + GFM（支持表格），不支持 Telegram 的 spoiler；@ 某人需要写 `<at user_id="ou_...">名字</at>`（本版未接入，模型写 `@名字` 只会显示为纯文本）；不提供消息深链。
+3. **提示词**：`prompts/system.velin.md` 写的是 “Telegram group chat”、“Telegram-flavored Markdown” 和 `t.me` 链接前缀，`prompts/late-binding.velin.md` 写的是 “Telegram group chat”。建议按 `currentChannel` 分支：飞书输出的是 CommonMark + GFM（支持表格），不支持 Telegram 的 spoiler；@ 某人需要写 `<at user_id="ou_...">名字</at>`（现已接入，见 §1；模型写 `@名字` 仍只是纯文本）；不提供消息深链。
 4. **`AGENTS.md`**：Ownership 中的 `telegram/` 不再包含 event-sink，需要新增 `src/feishu/` 和 `src/event-sink.ts`；“Telegram Clients And Ingress” 一节中 event-sink 的位置要更新；Startup order 改为 “migrate → platform identity prepare → cold replay → … → platform start”；Configured chats 一节注明飞书不归档未配置的会话；记录 `events.dedup_key`。`docs/telegram-module-architecture.md` 如果引用了 event-sink 的路径，也需要同步。
 5. **被动图片描述（建议，后续工作）**：需要在 `createFeishuIngress` 的 build 阶段加一个可选的 `prepareAttachments?: (event: CanonicalMessageEvent) => Promise<void>` 钩子，由 registrar 用 `MEDIA_RUNTIME` 的 `imageResolvers`、`generateThumbnail` 和 `downloadMessageMedia` 实现：下载图片 → `thumbnailWebp` → `imageToText.resolve`。这样 `EventSink.publish` 里已有的 `hydrateAltText` 会把缓存里的描述回填到附件上。`src/media/**` 本身不需要改。

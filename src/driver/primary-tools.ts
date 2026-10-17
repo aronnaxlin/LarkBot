@@ -36,7 +36,7 @@ export interface PrimaryToolsConfig {
 
 export interface PrimaryToolsDependencies extends Pick<
   DriverPlatform,
-  'sendMessage' | 'banSpammer' | 'setMessageReaction' | 'loadMessageAttachments' | 'messageExists' | 'downloadMessageMedia'
+  'sendMessage' | 'banSpammer' | 'setMessageReaction' | 'loadMessageAttachments' | 'messageExists' | 'downloadMessageMedia' | 'supportsOutboundAttachments'
 > {
   chatId: string;
   chatConfig: PrimaryToolsConfig;
@@ -107,7 +107,7 @@ export const createPrimaryTools = (deps: PrimaryToolsDependencies): CahciuaTool[
   const { loadMessageAttachments, downloadMessageMedia, banSpammer } = deps;
   if ((loadMessageAttachments == null) !== (downloadMessageMedia == null))
     throw new Error('Platform attachment capability requires both loadMessageAttachments and downloadMessageMedia');
-  const attachmentsSupported = loadMessageAttachments != null && downloadMessageMedia != null;
+  const inboundAttachmentsSupported = loadMessageAttachments != null && downloadMessageMedia != null;
 
   const messageExists = (messageId: string) => deps.messageExists(deps.chatId, messageId);
   const sendMessageTool = createSendMessageTool(async (text, replyTo, attachments) => {
@@ -124,9 +124,9 @@ export const createPrimaryTools = (deps: PrimaryToolsDependencies): CahciuaTool[
       attachments,
     );
     return { messageId: sent.messageId };
-  }, messageExists, { attachments: attachmentsSupported });
+  }, messageExists, { attachments: deps.supportsOutboundAttachments === true });
 
-  const downloadAttachment = attachmentsSupported
+  const downloadAttachment = inboundAttachmentsSupported
     ? createAttachmentDownloader({
         chatId: deps.chatId,
         loadMessageAttachments,
@@ -158,7 +158,7 @@ export const createPrimaryTools = (deps: PrimaryToolsDependencies): CahciuaTool[
   if (deps.chatConfig.tools.webFetch)
     tools.push(createWebFetchTool(createWebFetcher(deps.chatConfig.tools.webFetch)));
 
-  if (attachmentsSupported) {
+  if (inboundAttachmentsSupported) {
     tools.push(createDownloadFileTool({
       downloadAttachment,
       runtime: deps.runtimeConfig,

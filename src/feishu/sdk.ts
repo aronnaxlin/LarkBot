@@ -1,7 +1,9 @@
+import type { Readable } from 'node:stream';
+
 import type { Logger } from '@guiiai/logg';
 import * as lark from '@larksuiteoapi/node-sdk';
 
-import { FeishuApiError } from './api';
+import { assertMessageResourceSize, FeishuApiError, MessageResourceReadError, readMessageResourceStream } from './api';
 import type { FeishuApi } from './api';
 import type { FeishuCredentials } from './credentials';
 
@@ -149,6 +151,31 @@ export const createFeishuSdk = (credentials: FeishuCredentials, logger: Logger) 
       await call('reaction.delete', () => client.im.v1.messageReaction.delete({
         path: { message_id: messageId, reaction_id: reactionId },
       }));
+    },
+    getMessageResource: async ({ messageId, fileKey, type }) => {
+      // A stream response has no `code`, so `call` does not apply; SDK/axios
+      // failures are converted here and the read enforces the size cap.
+      let response: { getReadableStream: () => Readable; headers?: Record<string, unknown> };
+      try {
+        response = await client.im.v1.messageResource.get({
+          path: { message_id: messageId, file_key: fileKey },
+          params: { type },
+        });
+      } catch (error) {
+        throw toApiError('message.resource.get', error);
+      }
+      // Reject an advertised oversized body before consuming it; the reader
+      // enforces the cap again because Content-Length can be absent or wrong.
+      assertMessageResourceSize(response.headers?.['content-length']);
+      try {
+        return await readMessageResourceStream(response.getReadableStream());
+      } catch (error) {
+        // Locally raised size/timeout errors carry no server data; mid-stream
+        // transport failures may, so they go through the same sanitizer as
+        // other SDK errors before reaching the model.
+        if (error instanceof MessageResourceReadError) throw error;
+        throw toApiError('message.resource.get', error);
+      }
     },
   };
 

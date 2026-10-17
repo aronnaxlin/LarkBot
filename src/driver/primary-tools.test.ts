@@ -68,6 +68,7 @@ const createFixture = () => {
     loadMessageAttachments: vi.fn(() => [{ type: 'photo' as const }]),
     messageExists: vi.fn(() => true),
     downloadMessageMedia: vi.fn(async () => undefined),
+    supportsOutboundAttachments: true,
     readOldMessages: vi.fn(() => ''),
     resolveModel: vi.fn(() => endpoint),
     backgroundTask: {
@@ -242,7 +243,7 @@ describe('createPrimaryTools', () => {
     });
 
     expect(deps.loadMessageAttachments).toHaveBeenCalledWith('chat-1', '123');
-    expect(deps.downloadMessageMedia).toHaveBeenCalledWith('chat-1', '123');
+    expect(deps.downloadMessageMedia).toHaveBeenCalledWith('chat-1', '123', 0);
     expect(result).toEqual({
       content: JSON.stringify({ ok: true, path: 'downloaded.bin', size: 4 }),
       requiresFollowUp: true,
@@ -257,7 +258,19 @@ describe('createPrimaryTools', () => {
       path: 'downloaded.bin',
     });
     expect(deps.loadMessageAttachments).toHaveBeenCalledWith('chat-1', 'om_synthetic');
-    expect(deps.downloadMessageMedia).toHaveBeenCalledWith('chat-1', 'om_synthetic');
+    expect(deps.downloadMessageMedia).toHaveBeenCalledWith('chat-1', 'om_synthetic', 0);
+  });
+
+  it('downloads a later attachment index of a multi-attachment message', async () => {
+    const { deps } = createFixture();
+    vi.mocked(deps.loadMessageAttachments!).mockReturnValue([{ type: 'photo' }, { type: 'photo' }]);
+    vi.mocked(deps.downloadMessageMedia!).mockResolvedValue(Buffer.from('second'));
+    await findTool(createPrimaryTools(deps), 'download_file').execute({
+      file_id: 'om_multi:1',
+      path: 'downloaded.bin',
+    });
+    expect(deps.loadMessageAttachments).toHaveBeenCalledWith('chat-1', 'om_multi');
+    expect(deps.downloadMessageMedia).toHaveBeenCalledWith('chat-1', 'om_multi', 1);
   });
 
   it('hides attachment and moderation tools when the platform lacks those capabilities', async () => {
@@ -265,6 +278,7 @@ describe('createPrimaryTools', () => {
     deps.chatConfig.tools.banSpammer = true;
     deps.loadMessageAttachments = undefined;
     deps.downloadMessageMedia = undefined;
+    deps.supportsOutboundAttachments = undefined;
     deps.banSpammer = undefined;
     const tools = createPrimaryTools(deps);
 
@@ -298,6 +312,25 @@ describe('createPrimaryTools', () => {
     const { deps } = createFixture();
     deps.downloadMessageMedia = undefined;
     expect(() => createPrimaryTools(deps)).toThrow('requires both');
+  });
+
+  it('exposes inbound downloads without advertising send_message attachments', async () => {
+    const { deps } = createFixture();
+    deps.supportsOutboundAttachments = false;
+    vi.mocked(deps.downloadMessageMedia!).mockResolvedValue(Buffer.from('file'));
+    const tools = createPrimaryTools(deps);
+
+    // Feishu shape: read_image(file_id)/download_file work, send_message stays text-only.
+    expect(tools.map(tool => tool.name)).toContain('download_file');
+    const sendMessage = findTool(tools, 'send_message');
+    expect(JSON.stringify(sendMessage.parameters)).not.toContain('attachments');
+    await expect(sendMessage.execute({ text: 'hi', attachments: [{ type: 'photo', path: 'x.png' }] }))
+      .resolves.toMatchObject({ content: expect.stringContaining('Attachments are not supported'), requiresFollowUp: true });
+    expect(deps.sendMessage).not.toHaveBeenCalled();
+
+    await findTool(tools, 'download_file').execute({ file_id: 'om_synthetic:0', path: 'downloaded.bin' });
+    expect(deps.loadMessageAttachments).toHaveBeenCalledWith('chat-1', 'om_synthetic');
+    expect(deps.downloadMessageMedia).toHaveBeenCalledWith('chat-1', 'om_synthetic', 0);
   });
 
   it('uses the configured model through the media description call for read_image', async () => {

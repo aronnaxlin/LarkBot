@@ -33,7 +33,12 @@ export const createTelegramDriverPlatform = (deps: {
     const id = parseTelegramMessageId(messageId);
     return id == null ? undefined : deps.loadMessageAttachments(chatId, id);
   },
-  downloadMessageMedia: async (chatId, messageId) =>
-    await deps.hooks.downloadMessageMedia(chatId, requireTelegramMessageId(messageId)),
+  downloadMessageMedia: async (chatId, messageId, index) => {
+    // Telegram messages carry at most one downloadable media file.
+    if (index !== 0)
+      throw new Error(`This platform exposes exactly one downloadable attachment per message; index ${index} is not addressable.`);
+    return await deps.hooks.downloadMessageMedia(chatId, requireTelegramMessageId(messageId));
+  },
+  supportsOutboundAttachments: true,
   banSpammer: async (chatId, messageId) => await deps.banSpammer(chatId, requireTelegramMessageId(messageId)),
 });

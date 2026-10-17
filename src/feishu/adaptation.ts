@@ -1,4 +1,4 @@
-import { parseFeishuContent } from './content';
+import { parseFeishuAttachments, parseFeishuContent } from './content';
 import type { FeishuMessageReceiveEvent, FeishuMessageRecalledEvent } from './events';
 import type { CanonicalDeleteEvent, CanonicalMessageEvent, CanonicalUser } from '../adaptation/types';
 
@@ -35,7 +35,7 @@ export const adaptFeishuMessage = (
     timestampSec: Math.floor(Number(message.create_time) / 1000),
     utcOffsetMin: meta.utcOffsetMin,
     content: parseFeishuContent(message.message_type, message.content, message.mentions),
-    attachments: [],
+    attachments: parseFeishuAttachments(message.message_type, message.content),
   };
   // parent_id is the directly quoted message; root_id/thread_id are not used
   // because LarkBot keeps one context per chat.

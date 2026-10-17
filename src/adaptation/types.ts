@@ -17,6 +17,9 @@ export interface CanonicalAttachment {
   stickerSetId?: string;
   stickerSetName?: string;
   format?: 'static' | 'animated' | 'video';
+  // Platform resource key required to download the original bytes (Feishu
+  // `image_key`). Telegram re-downloads by (chatId, messageId) and leaves it unset.
+  fileKey?: string;
   altText?: string;
 }
 

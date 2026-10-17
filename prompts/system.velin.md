@@ -178,7 +178,7 @@ Supported Markdown syntax:
 - `[link text](url)`
 - `> blockquote`, lists, and Markdown tables
 
-Not available here: spoilers, math, underline, and file or image attachments.
+Not available here: spoilers, math, underline, and sending file or image attachments. Images people post in the chat can still be read with `read_image` using their `file-id`.
 
 ### Mentioning a participant
 

@@ -26,6 +26,7 @@ const sdk = vi.hoisted(() => {
       sendPost: async () => ({ messageId: 'om_sent', createTimeMs: 1 }),
       createReaction: async () => ({ reactionId: 'r1' }),
       deleteReaction: async () => {},
+      getMessageResource: vi.fn(async () => Buffer.from('synthetic-bytes')),
     },
     start: async (handlers: { onMessageReceive: (data: unknown) => Promise<void> }) => {
       state.handlers = handlers;
@@ -106,6 +107,33 @@ describe('Feishu platform wiring', () => {
       const userNames = container.get(TOKENS.FEISHU_USER_NAMES);
       expect(userNames.isKnown(CHAT, 'ou_synthetic_alice')).toBe(true);
       expect(userNames.isKnown(CHAT, 'ou_synthetic_stranger')).toBe(false);
+
+      await sdk.state.handlers!.onMessageReceive({
+        sender: { sender_id: { open_id: 'ou_synthetic_alice' }, sender_type: 'user' },
+        message: {
+          message_id: 'om_image',
+          create_time: '1760000001000',
+          chat_id: CHAT,
+          chat_type: 'group',
+          message_type: 'image',
+          content: JSON.stringify({ image_key: 'img_v3_synthetic' }),
+        },
+      });
+
+      // The registrar wires inbound attachments from the archived event while
+      // outbound attachments stay unsupported (and unadvertised).
+      const platform = container.get(TOKENS.DRIVER_PLATFORM);
+      expect(platform.supportsOutboundAttachments).toBeUndefined();
+      expect(platform.loadMessageAttachments?.(CHAT, 'om_image')).toEqual([
+        { type: 'photo', fileKey: 'img_v3_synthetic' },
+      ]);
+      await expect(platform.downloadMessageMedia!(CHAT, 'om_image', 0)).resolves.toEqual(Buffer.from('synthetic-bytes'));
+      expect(sdk.fake.api.getMessageResource).toHaveBeenCalledWith({
+        messageId: 'om_image',
+        fileKey: 'img_v3_synthetic',
+        type: 'image',
+      });
+
       await runtime.stop();
       expect(tdl.configure).not.toHaveBeenCalled();
       expect(tdl.createClient).not.toHaveBeenCalled();

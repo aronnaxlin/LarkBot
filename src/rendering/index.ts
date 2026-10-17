@@ -72,6 +72,13 @@ const renderContent = (nodes: ContentNode[]): string =>
 
 const REPLY_PREVIEW_MAX_CHARS = 100;
 
+// Feishu retries delivery after the bot was disconnected or restarting: live
+// evidence from 2026-10-17 showed events arriving about 5 min, 1 h and 6 h late
+// with their original `timestampSec`. Past this gap, `t` alone makes a fresh
+// direct address look like stale history. A local clock ahead of the platform
+// clock by more than this would tag every message; the bot's own sends are exempt.
+const LATE_DELIVERY_THRESHOLD_SEC = 120;
+
 /** Truncate rendered XML without breaking tags. */
 const truncateXml = (xml: string, maxLen: number): string => {
   if (xml.length <= maxLen) return xml;
@@ -119,6 +126,10 @@ const renderMessage = (msg: ICMessage, params: RenderParams): { content: Rendere
   // so the two never collide even though this bot is also a bot account.
   const isBot = !isMyself && msg.sender?.isBot === true;
   const isBlocked = !!(msg.sender?.id && params.blockedUserIds?.has(msg.sender.id));
+  // Maintainer status comes only from trusted deployment config, never from
+  // message content. Own messages never carry the attribute; blocked senders
+  // are masked, so their maintainer flag is suppressed too.
+  const isMaintainer = !isMyself && !isBlocked && !!(msg.sender?.id && params.maintainers?.has(msg.sender.id));
   // Blocked senders can't reach the bot — suppress mention / reply-to-bot
   // triggers regardless of content, so the message can't sneak past the probe gate.
   const mentionsMe = !isBlocked && !!(params.botUserId && hasMention(msg.content, params.botUserId));
@@ -133,7 +144,11 @@ const renderMessage = (msg: ICMessage, params: RenderParams): { content: Rendere
   }
   if (isMyself) attrs.push('myself="true"');
   if (isBot) attrs.push('bot="true"');
+  if (isMaintainer) attrs.push('maintainer="true"');
   attrs.push(`t="${formatTimestamp(msg.timestampSec, msg.utcOffsetMin)}"`);
+
+  if (!isMyself && msg.receivedAtMs / 1000 - msg.timestampSec > LATE_DELIVERY_THRESHOLD_SEC)
+    attrs.push(`received="${formatTimestamp(Math.floor(msg.receivedAtMs / 1000), msg.utcOffsetMin)}"`);
 
   if (msg.editedAtSec != null)
     attrs.push(`edited="${formatTimestamp(msg.editedAtSec, msg.editUtcOffsetMin ?? msg.utcOffsetMin)}"`);

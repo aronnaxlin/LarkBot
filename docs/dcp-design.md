@@ -36,6 +36,7 @@ Canonical IDs are strings. Every event carries:
 - `receivedAtMs`: local ingress time captured before asynchronous transforms.
 - `timestampSec`: Telegram server time.
 - `utcOffsetMin`: ingress-local timezone offset.
+- A `receivedAtMs` more than 120 s ahead of `timestampSec` marks a late-delivered event (Feishu retries after disconnects with the original `timestampSec`). Rendering adds a `received` attribute with the local arrival time next to `t`, so the model treats the message as new; ordering still uses `receivedAtMs`.
 
 `receivedAtMs` is the ordering timestamp. Persistence uses `(received_at, id)` as a deterministic tie-break.
 

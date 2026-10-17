@@ -17,6 +17,7 @@ export const registerPipeline = ({ get, register }: Registrar): void => {
       // Feishu mentions address participants by open_id, which the model reads
       // off the chatlog. Telegram keeps its original chatlog shape.
       senderUid: config.platform === 'feishu',
+      maintainers: get(TOKENS.MAINTAINERS),
     }, chatId => blockedUsers.get(chatId));
   });
 };

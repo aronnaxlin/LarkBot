@@ -49,6 +49,7 @@ writeFileSync(configPath, stringify({
   database: { path: join(directory, 'test.db') },
   runtime: { writeFile: ['cat'], readFile: ['cat'] },
   backgroundTasks: { outputDir: join(directory, 'tasks') },
+  maintainers: ['ou_synthetic_alice'],
   chats: { default: { tools: {}, sendTypingAction: false }, [CHAT]: {} },
 }));
 vi.stubEnv('CONFIG_PATH', configPath);
@@ -103,6 +104,12 @@ describe('Feishu platform wiring', () => {
       // Feishu chatlogs carry the sender open_id, which outgoing mentions copy.
       const [, rendered] = handleEvent.mock.calls.at(-1) as [string, Array<{ content: Array<{ type: string; text?: string }> }>];
       expect(rendered[0]!.content[0]!.text).toContain('uid="ou_synthetic_alice"');
+      expect(rendered[0]!.content[0]!.text).toContain('maintainer="true"');
+      // Container exposes the trusted-id check for future permission gating;
+      // it reads deployment config, never chat content.
+      const isMaintainer = container.get(TOKENS.IS_MAINTAINER);
+      expect(isMaintainer('ou_synthetic_alice')).toBe(true);
+      expect(isMaintainer('ou_synthetic_stranger')).toBe(false);
       // Ingress and the driver platform share one participant cache.
       const userNames = container.get(TOKENS.FEISHU_USER_NAMES);
       expect(userNames.isKnown(CHAT, 'ou_synthetic_alice')).toBe(true);

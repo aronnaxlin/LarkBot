@@ -123,7 +123,11 @@ const renderMessage = (msg: ICMessage, params: RenderParams): { content: Rendere
   const attrs: string[] = [
     `id="${escapeXml(msg.messageId)}"`,
   ];
-  if (msg.sender) attrs.push(`sender="${escapeXml(formatSender(msg.sender, params.contactNames))}"`);
+  if (msg.sender) {
+    attrs.push(`sender="${escapeXml(formatSender(msg.sender, params.contactNames))}"`);
+    // Stable platform identity, needed to address Feishu participants by open_id.
+    if (params.senderUid) attrs.push(`uid="${escapeXml(msg.sender.id)}"`);
+  }
   if (isMyself) attrs.push('myself="true"');
   attrs.push(`t="${formatTimestamp(msg.timestampSec, msg.utcOffsetMin)}"`);
 

@@ -2,6 +2,10 @@ export interface RenderParams {
   compactCursorMs?: number;
   botUserId?: string;
   contactNames?: Map<string, string>;
+  // Include the sender's stable platform id (`uid="..."`) on `<message>`.
+  // Feishu needs open_ids to render outgoing mentions; Telegram leaves it off
+  // so its chatlog stays unchanged.
+  senderUid?: boolean;
   // Users whose messages should render as a self-closing `<message blocked="true"/>`
   // with no content. Sender info is kept so the model can see who was blocked.
   // Blocked messages also suppress `mentionsMe` / `repliesToMe`, so they can't

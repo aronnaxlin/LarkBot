@@ -7,6 +7,7 @@ import type { createDriver, DriverPlatform } from '../driver';
 import type { DriverInputBus } from '../driver/input-bus';
 import type { EventSink } from '../event-sink';
 import type { FeishuBotIdentity, FeishuIngress, FeishuSdk } from '../feishu';
+import type { createFeishuUserNames } from '../feishu/user-names';
 import type { MediaRuntime } from '../media/runtime';
 import type { createPipeline } from '../pipeline';
 import type { PlatformIdentity, PlatformRuntime } from '../startup/platform';
@@ -45,6 +46,7 @@ export const TOKENS = {
   FEISHU_SDK: token<FeishuSdk>('FeishuSdk'),
   FEISHU_BOT_IDENTITY: token<FeishuBotIdentity>('FeishuBotIdentity'),
   FEISHU_INGRESS: token<FeishuIngress>('FeishuIngress'),
+  FEISHU_USER_NAMES: token<ReturnType<typeof createFeishuUserNames>>('FeishuUserNames'),
   FEISHU_DRIVER_PLATFORM: token<DriverPlatform>('FeishuDriverPlatform'),
   FEISHU_RUNTIME: token<PlatformRuntime>('FeishuRuntime'),
   TELEGRAM_RUNTIME: token<PlatformRuntime>('TelegramRuntime'),

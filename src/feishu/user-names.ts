@@ -35,8 +35,11 @@ export const createFeishuUserNames = (deps: {
   const refreshMs = deps.refreshMs ?? DEFAULT_REFRESH_MS;
   const failureBackoffMs = deps.failureBackoffMs ?? DEFAULT_FAILURE_BACKOFF_MS;
   const cache = new Map<string, CacheEntry>();
+  // open_ids seen in this process, as senders or in a message's mention list.
+  const known = new Set<string>();
 
   const remember = (openId: string, name: string | undefined): void => {
+    known.add(openId);
     if (!name) return;
     const entry = cache.get(openId);
     if (entry) entry.name = name;
@@ -60,6 +63,7 @@ export const createFeishuUserNames = (deps: {
   };
 
   const resolve = async (chatId: string, openId: string): Promise<string> => {
+    known.add(openId);
     let entry = cache.get(openId);
     if (!entry) {
       entry = { refreshAtMs: 0 };
@@ -78,7 +82,13 @@ export const createFeishuUserNames = (deps: {
     return entry.name ?? deps.fallbackName?.(chatId, openId) ?? '';
   };
 
-  return { resolve, remember };
+  // True when the open_id is a participant this process has seen, or one that
+  // projected history knows (a restart clears the in-process set, and the
+  // fallback keeps mentions of previously-seen members working).
+  const isKnown = (chatId: string, openId: string): boolean =>
+    known.has(openId) || deps.fallbackName?.(chatId, openId) != null;
+
+  return { resolve, remember, isKnown };
 };
 
 export type FeishuUserNames = ReturnType<typeof createFeishuUserNames>;

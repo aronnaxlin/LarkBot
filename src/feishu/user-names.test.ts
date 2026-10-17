@@ -45,4 +45,25 @@ describe('createFeishuUserNames', () => {
     await vi.waitFor(async () => expect(await names.resolve('oc_chat', 'ou_slow')).toBe('Slow'));
     expect(fetchName).toHaveBeenCalledTimes(1);
   });
+
+  it('knows participants seen in-process and falls back to projected history', async () => {
+    const fetchName = vi.fn(async (): Promise<string | undefined> => undefined);
+    const names = createFeishuUserNames({
+      fetchName,
+      fallbackName: (_chatId, openId) => openId === 'ou_old' ? 'Old Name' : undefined,
+      logger,
+    });
+    expect(names.isKnown('oc_chat', 'ou_nobody')).toBe(false);
+
+    names.remember('ou_mentioned', 'Mentioned');
+    expect(names.isKnown('oc_chat', 'ou_mentioned')).toBe(true);
+    names.remember('ou_nameless', undefined);
+    expect(names.isKnown('oc_chat', 'ou_nameless')).toBe(true);
+
+    expect(names.isKnown('oc_chat', 'ou_old')).toBe(true);
+    expect(names.isKnown('oc_other', 'ou_old')).toBe(true);
+
+    await names.resolve('oc_chat', 'ou_sender');
+    expect(names.isKnown('oc_chat', 'ou_sender')).toBe(true);
+  });
 });

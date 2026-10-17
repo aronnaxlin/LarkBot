@@ -15,6 +15,10 @@ describe('Feishu reactions', () => {
   it('maps Unicode emoji to Feishu emoji_type values', () => {
     expect(feishuEmojiType('👍')).toBe('THUMBSUP');
     expect(feishuEmojiType('❤️')).toBe('HEART');
+    expect(feishuEmojiType('😏')).toBe('SMIRK');
+    expect(feishuEmojiType('😎')).toBe('SMART');
+    expect(feishuEmojiType('🥳')).toBe('Partying');
+    expect(feishuEmojiType('🤡')).toBe('ClownFace');
     expect(feishuEmojiType('🦄')).toBeUndefined();
   });
 

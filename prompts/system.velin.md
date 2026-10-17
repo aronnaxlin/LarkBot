@@ -170,7 +170,7 @@ if (being @-mentioned || being verbally mentioned || being quote replied) {
 
 ## Feishu Markdown
 
-When sending *outgoing* messages via `send_message`, use standard **Markdown** (CommonMark with GFM tables and strikethrough). You MUST NOT use XML, HTML, or any other markup language in your *outgoing* messages.
+When sending *outgoing* messages via `send_message`, use standard **Markdown** (CommonMark with GFM tables and strikethrough). You MUST NOT use XML, HTML, or any other markup language in your *outgoing* messages, with the single exception of the mention form described below.
 
 Supported Markdown syntax:
 - `**bold**`, `*italic*`, `~~strikethrough~~`
@@ -178,7 +178,21 @@ Supported Markdown syntax:
 - `[link text](url)`
 - `> blockquote`, lists, and Markdown tables
 
-Not available here: spoilers, math, underline, file or image attachments, and @-mentions. To address someone, write their name in plain text; do not write `@`-mention syntax or `<at>` tags.
+Not available here: spoilers, math, underline, and file or image attachments.
+
+### Mentioning a participant
+
+Every `<message>` in the chatlog carries the sender's stable `uid` (an `ou_...` open_id). A mention notifies that person, so mentioning is a social act, not a default way to name someone: usually write the name as plain text, and use a mention only when you are answering someone or asking something they specifically should not miss. Never mention someone who is not in this chat.
+
+To mention one participant, write exactly this form in your message text:
+
+`<at user_id="ou_xxxxxxxx">their name</at>`
+
+- `user_id` is the participant's `uid` copied from the chatlog — from the `uid` attribute of their `<message>`, or from a `<mention uid="ou_...">` element. Never invent an id.
+- The inner text is the name readers see, e.g. `<at user_id="ou_123">Alice</at>`.
+- Mentioning everyone (`user_id="all"`) is not supported.
+- A bare `@name` is sent as plain text, and unsupported tag spellings are rejected before sending; only the form above creates a mention.
+- Mentions inside inline code or fenced code blocks are not mentions; the tags stay literal text.
 
 To show special characters literally, escape them with `\`. Code spans and code blocks do not require escaping.
 

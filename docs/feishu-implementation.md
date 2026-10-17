@@ -17,9 +17,10 @@
 - 撤回：`im.message.recalled_v1` 映射为 canonical `delete`。
 - 发送者身份：`CanonicalUser.id` 取 open_id（应用内稳定）；`isBot = sender_type !== 'user'`。昵称来源依次是通讯录 API（等待上限 1 秒，结果缓存 6 小时，失败后 10 分钟内不重试）、本进程见过的 @ 名字、IC 中的历史名字；都没有时为空，Rendering 回退显示 open_id。
 - 发送：`post` 消息，内容是单个 `md` 元素（CommonMark + GFM）；有 `reply_to` 时调用 reply 接口。
+- 发送 @：模型在 `send_message` 文本里写 `<at user_id="ou_...">名字</at>`，`src/feishu/post-content.ts` 校验后原样放进 `md` 元素（飞书 md 扩展语法）。open_id 必须是本群见过的参与者（本进程见过的发送者或被 @ 者，或 IC 中的历史发送者），否则工具报错；不支持 @所有人；代码块和行内代码里的标签按字面发送。飞书模式下 chatlog 的 `<message>` 带 `uid` 属性，供模型复制 open_id；Telegram 渲染不变。
 - Synthetic self-event：每次发送成功后，用服务端返回的 `message_id` 写入一条 `isSelfSent=true` 的 canonical 事件，再发布到 Pipeline，不唤醒 Driver。飞书不会把机器人自己的消息推回来，所以机器人只能通过这条路径看到自己说过的话。
 - 去重和崩溃恢复，见 §3。
-- 表情：为 30 个常用 Unicode emoji 做了 `emoji_type` 映射。未映射的 emoji 直接报错，不会假装成功；移除表情需要本进程记录的 `reaction_id`，重启后无法移除或替换之前加的表情，同样会报错。
+- 表情：为常用 Unicode emoji 做了 `emoji_type` 映射（含 😏 `SMIRK`、😎 `SMART`）。未映射的 emoji 直接报错，不会假装成功；移除表情需要本进程记录的 `reaction_id`，重启后无法移除或替换之前加的表情，同样会报错。
 
 ### 未实现（后续工作）
 

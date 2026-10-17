@@ -5,7 +5,7 @@ import { renderLateBindingPrompt, renderSystemPrompt } from './prompt';
 // Platform wording must follow the configured channel, and Feishu output rules
 // must not advertise capabilities the Feishu adapter lacks.
 const system = (currentChannel: 'telegram' | 'feishu', mode: 'primary' | 'probe', chatId: string) =>
-  renderSystemPrompt({ mode, currentChannel, modelName: 'test-model', chatId });
+  renderSystemPrompt({ mode, currentChannel, chatId });
 
 describe('platform-specific prompts', () => {
   it('renders Feishu wording without Telegram-only syntax or deep links, but with the mention form', async () => {

@@ -118,7 +118,6 @@ export const executeWakeup = async (params: {
     const system = await renderSystemPrompt({
       mode: 'probe',
       currentChannel: params.currentChannel,
-      modelName: params.chatConfig.probe.model.model,
       chatId: params.chatId,
       chatTitle: params.getChatTitle(params.chatId),
       systemFiles: params.chatConfig.systemFiles,
@@ -200,7 +199,6 @@ export const executeWakeup = async (params: {
     const system = await renderSystemPrompt({
       mode: 'primary',
       currentChannel: params.currentChannel,
-      modelName: params.chatConfig.primary.model.model,
       chatId: params.chatId,
       chatTitle: params.getChatTitle(params.chatId),
       systemFiles: params.chatConfig.systemFiles,

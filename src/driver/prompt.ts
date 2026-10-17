@@ -33,7 +33,6 @@ export type PromptChannel = 'telegram' | 'feishu';
 
 export const renderSystemPrompt = async (params: {
   mode: PromptMode;
-  modelName: string;
   currentChannel: PromptChannel;
   chatId: string;
   chatTitle?: string;

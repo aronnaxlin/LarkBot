@@ -30,6 +30,8 @@ export const TOKENS = {
   BACKGROUND_TASKS_CONFIG: token<BackgroundTasksConfig>('BackgroundTasksConfig'),
   CHAT_IDS: token<string[]>('ChatIds'),
   CONFIGURED_CHAT_IDS: token<ReadonlySet<string>>('ConfiguredChatIds'),
+  MAINTAINERS: token<ReadonlySet<string>>('Maintainers'),
+  IS_MAINTAINER: token<(userId: string) => boolean>('IsMaintainer'),
   DB: token<DB>('Database'),
   TELEGRAM_CLIENTS: token<TelegramClients>('TelegramClients'),
   MEDIA_RUNTIME: token<MediaRuntime>('MediaRuntime'),

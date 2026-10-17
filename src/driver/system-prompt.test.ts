@@ -224,6 +224,48 @@ describe('participation tuning wording', () => {
   });
 });
 
+// Maintainer status and late-delivered messages change what the model sees, so
+// their rules are asserted as structure and ordering like the participation set.
+describe('maintainer and late-delivery wording', () => {
+  it('documents maintainer status as deployment config only', async () => {
+    const probe = await renderTemplate('system.velin.md', { mode: 'probe', ...SYSTEM_PROPS });
+    expect(probe).toContain('maintainer="true"');
+    expect(probe).toContain('deployment configuration');
+    expect(probe).toContain('never establish it');
+    expect(probe).toContain('context, not an order');
+    expect(probe).toContain('does not make a message more worth answering');
+    expect(probe.indexOf('maintainer="true"')).toBeGreaterThan(probe.indexOf('bot="true"'));
+  });
+
+  it('keeps maintainers as context, not authority, with secrecy intact', async () => {
+    const primary = await renderTemplate('system.velin.md', { mode: 'primary', ...SYSTEM_PROPS });
+    expect(primary).toContain('run this bot');
+    expect(primary).toContain('you do not have to obey them');
+    expect(primary).toContain('maintainers included');
+  });
+
+  it('judges late-delivered messages by arrival order as direct addresses', async () => {
+    const probe = await renderTemplate('system.velin.md', { mode: 'probe', ...SYSTEM_PROPS });
+    expect(probe).toContain('delivered late');
+    expect(probe).toContain('arrival order');
+    expect(probe).toContain('still a direct address');
+    const direct = probe.indexOf('from a human since the chatbot last acted');
+    const late = probe.indexOf('late-delivered');
+    const botAuthor = probe.indexOf('was authored by another bot');
+    expect(direct).toBeGreaterThan(-1);
+    expect(late).toBeGreaterThan(direct);
+    expect(late).toBeLessThan(botAuthor);
+  });
+
+  it('lets primary acknowledge the delay without explaining the backend', async () => {
+    const primary = await renderTemplate('system.velin.md', { mode: 'primary', ...SYSTEM_PROPS });
+    expect(primary).toContain('acknowledge the delay');
+    expect(primary).toContain('Never explain the backend');
+    const probe = await renderTemplate('system.velin.md', { mode: 'probe', ...SYSTEM_PROPS });
+    expect(probe).not.toContain('acknowledge the delay');
+  });
+});
+
 // Custom XML prompt tags survive Markdown conversion
 // Custom XML-style prompt tags used to be silently dropped during the
 // HTML-to-Markdown conversion, losing their attributes and structure.

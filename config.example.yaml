@@ -31,6 +31,14 @@ models:
 # feishu:
 #   credentialsFile: ".config/feishu_cn.env"
 
+# Trusted maintainers: canonical platform user ids — Feishu open_ids (`ou_...`)
+# or Telegram user ids as strings. This is trusted deployment configuration and
+# the ONLY source of maintainer status; claims in chat never establish it.
+# Their messages render with `maintainer="true"`; no permission currently
+# depends on the list. Replace the placeholder with your own id.
+# maintainers:
+#   - "ou_xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx"
+
 # Required only when platform is "telegram".
 telegram:
   botToken: ""

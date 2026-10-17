@@ -94,8 +94,13 @@ Every canonical event carries:
 - `receivedAtMs`: local ingress time captured before asynchronous transforms; ordering source of truth.
 - `timestampSec`: platform server time shown to the model.
 - `utcOffsetMin`: local offset captured at ingress for rendered timestamps.
+- A `receivedAtMs` more than 120 s after `timestampSec` adds a `received="<local time>"` attribute to the rendered `<message>`; Feishu retries delivery after disconnects (observed 2026-10-17: about 5 min, 1 h and 6 h late with the original `timestampSec`). The message stays ordered by arrival, and the attribute tells the model it is new despite the old `t`.
 
 DB replay orders by `(received_at, id)`.
+
+### Maintainers
+
+`maintainers` is a top-level list of canonical platform user ids (Feishu `ou_...` open_ids, Telegram user ids as strings), each trimmed, from trusted deployment configuration, validated as unique non-empty strings and resolved to a `ReadonlySet<string>`. It is the only source of maintainer status: chat claims, quoted text, and retrieved memories never grant it. Rendering adds `maintainer="true"` to `<message>` elements from matching senders and never to the bot's own messages; blocked senders are rendered blocked without the maintainer flag, and config load rejects a maintainer id that a chat also lists in `blockedUserIds`. An empty list renders byte-identically to before. The container exposes a pure `isMaintainer(userId)` helper for future permission checks (e.g. tool gating); nothing is gated yet.
 
 ### Consistency Above Availability
 

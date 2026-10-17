@@ -177,6 +177,18 @@ const BackgroundTasksSchema = v.optional(v.object({
 
 const ConfigSchema = v.object({
   models: v.record(v.string(), v.object(llmEndpointEntries)),
+  /**
+   * Trusted maintainer ids (Feishu open_id `ou_...` or Telegram user id strings).
+   * Deployment configuration is the only source of maintainer status; chat
+   * content and retrieved memories never grant it. See CLAUDE.md "Maintainers".
+   */
+  maintainers: v.optional(
+    v.pipe(
+      v.array(v.pipe(v.string(), v.trim(), v.minLength(1))),
+      v.check(ids => new Set(ids).size === ids.length, 'maintainer ids must be unique'),
+    ),
+    [],
+  ),
   /** Chat platform this process connects to. Exactly one platform runs per process. */
   platform: v.optional(v.picklist(['telegram', 'feishu']), 'telegram'),
   /** Required when platform is "telegram". */
@@ -249,7 +261,16 @@ const resolveTurnBudget = (chatId: string, merged: ChatConfig): TurnBudget => {
 
 // Cross-field rules the schema cannot express.
 const validateConfig = (config: Config): void => {
-  for (const chatId of getChatIds(config)) resolveTurnBudget(chatId, mergeChatConfig(config, chatId));
+  const maintainers = new Set(config.maintainers);
+  for (const chatId of getChatIds(config)) {
+    const merged = mergeChatConfig(config, chatId);
+    resolveTurnBudget(chatId, merged);
+    // A blocked maintainer would render as blocked, silently hiding the trusted
+    // flag; reject the ambiguous config instead of picking a precedence.
+    const blockedMaintainer = merged.blockedUserIds.find(id => maintainers.has(id));
+    if (blockedMaintainer)
+      throw new Error(`Config: maintainer "${blockedMaintainer}" is also in chats.${chatId}.blockedUserIds — remove it from one of them`);
+  }
 
   if (config.platform === 'telegram' && !config.telegram)
     throw new Error('Config: the "telegram" section is required when platform is "telegram"');

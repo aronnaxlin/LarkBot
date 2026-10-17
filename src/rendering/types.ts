@@ -6,6 +6,10 @@ export interface RenderParams {
   // Feishu needs open_ids to render outgoing mentions; Telegram leaves it off
   // so its chatlog stays unchanged.
   senderUid?: boolean;
+  // Canonical ids of trusted maintainers, from deployment config. Matching
+  // senders' messages carry `maintainer="true"`; the bot's own messages never
+  // do. Empty/absent means no attribute (byte-identical output).
+  maintainers?: ReadonlySet<string>;
   // Users whose messages should render as a self-closing `<message blocked="true"/>`
   // with no content. Sender info is kept so the model can see who was blocked.
   // Blocked messages also suppress `mentionsMe` / `repliesToMe`, so they can't

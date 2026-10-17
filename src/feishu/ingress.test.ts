@@ -210,7 +210,10 @@ describe('Feishu ingress', () => {
 });
 
 describe('Feishu send and synthetic self-events', () => {
-  const sendFixture = (sendPost: Parameters<typeof createFeishuDriverPlatform>[0]['api']['sendPost']) => {
+  const sendFixture = (
+    sendPost: Parameters<typeof createFeishuDriverPlatform>[0]['api']['sendPost'],
+    isKnownParticipant: (chatId: string, openId: string) => boolean = () => true,
+  ) => {
     const f = createFixture();
     let uuid = 0;
     const platform = createFeishuDriverPlatform({
@@ -218,6 +221,7 @@ describe('Feishu send and synthetic self-events', () => {
       botInfo: () => ({ openId: BOT, name: 'LarkBot' }),
       acceptSelfSent: f.ingress.acceptSelfSent,
       messageExists: (chatId, messageId) => canonicalMessageExists(f.db, chatId, messageId),
+      isKnownParticipant,
       logger,
       retryDelaysMs: [0, 0],
       newUuid: () => `uuid-${++uuid}`,
@@ -252,6 +256,39 @@ describe('Feishu send and synthetic self-events', () => {
     expect(f.pipeline.getIC(CHAT)!.nodes.at(-1)).toMatchObject({ messageId: 'om_sent', isSelfSent: true });
     expect(f.platform.messageExists(CHAT, 'om_sent')).toBe(true);
     expect(f.platform.messageExists(CHAT, 'om_missing')).toBe(false);
+  });
+
+  it('sends an outgoing mention and renders the self-event with the mentioned identity', async () => {
+    const sendPost = vi.fn(async () => ({ messageId: 'om_sent', createTimeMs: 1760000010000 }));
+    const f = sendFixture(sendPost);
+    await f.ingress.handleMessageReceive(receiveEvent());
+
+    await f.platform.sendMessage(CHAT, `<at user_id="${ALICE}">Alice</at> 在呢`);
+    expect(sendPost).toHaveBeenCalledWith(expect.objectContaining({
+      content: JSON.stringify({ zh_cn: { content: [[{ tag: 'md', text: `<at user_id="${ALICE}">Alice</at> 在呢` }]] } }),
+    }));
+    expect(loadEvents(f.db, CHAT).at(-1)).toMatchObject({
+      isSelfSent: true,
+      content: [
+        { type: 'mention', userId: ALICE, children: [{ type: 'text', text: '@Alice' }] },
+        { type: 'text', text: ' 在呢' },
+      ],
+    });
+    const rendered = new Map(f.pipeline.getRenderedChats()).get(CHAT)!;
+    const self = rendered.at(-1)!;
+    expect(self.content[0]).toMatchObject({
+      type: 'text',
+      text: expect.stringContaining(`<mention uid="${ALICE}">@Alice</mention> 在呢`),
+    });
+  });
+
+  it('rejects a mention of an unknown participant before calling Feishu', async () => {
+    const sendPost = vi.fn(async () => ({ messageId: 'om_sent', createTimeMs: 1 }));
+    const f = sendFixture(sendPost, (_chatId, openId) => openId === ALICE);
+    await expect(f.platform.sendMessage(CHAT, '<at user_id="ou_stranger">X</at> hi'))
+      .rejects.toThrow('Unknown participant ou_stranger');
+    expect(sendPost).not.toHaveBeenCalled();
+    expect(loadEvents(f.db, CHAT).filter(event => event.type === 'message' && event.isSelfSent)).toHaveLength(0);
   });
 
   it('reuses the uuid across bounded retries of one send and uses a new one for the next message', async () => {

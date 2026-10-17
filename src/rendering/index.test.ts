@@ -43,6 +43,13 @@ describe('render', () => {
       expect(result).toContain('</message>');
     });
 
+    it('emits the sender uid only when the platform needs it', () => {
+      // Telegram (no flag) must stay byte-identical to the pre-mention output.
+      expect(xml(render(ic([message()])))).not.toContain('uid=');
+      const withUid = xml(render(ic([message()]), { senderUid: true }));
+      expect(withUid).toContain('sender="Alice (@alice)" uid="1"');
+    });
+
     it('formats sender without username', () => {
       const result = xml(render(ic([message({ sender: bob })])));
       expect(result).toContain('sender="Bob"');

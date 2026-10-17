@@ -19,17 +19,23 @@ export const registerFeishu = ({ get, register }: Registrar): void => {
 
   register(TOKENS.FEISHU_BOT_IDENTITY, () => createFeishuBotIdentity(get(TOKENS.FEISHU_SDK).api));
 
+  // Shared by ingress (remember/resolve) and the driver platform (mention
+  // validation), so participants seen only as mentions stay mentionable.
+  register(TOKENS.FEISHU_USER_NAMES, () => {
+    const pipeline = get(TOKENS.PIPELINE);
+    return createFeishuUserNames({
+      fetchName: get(TOKENS.FEISHU_SDK).api.getUserName,
+      fallbackName: (chatId, openId) => pipeline.getIC(chatId)?.users.get(openId)?.user.displayName,
+      logger: get(TOKENS.LOGGER),
+    });
+  });
+
   register(TOKENS.FEISHU_INGRESS, () => {
     const db = get(TOKENS.DB);
-    const pipeline = get(TOKENS.PIPELINE);
     const logger = get(TOKENS.LOGGER);
     return createFeishuIngress({
       configuredChatIds: get(TOKENS.CONFIGURED_CHAT_IDS),
-      userNames: createFeishuUserNames({
-        fetchName: get(TOKENS.FEISHU_SDK).api.getUserName,
-        fallbackName: (chatId, openId) => pipeline.getIC(chatId)?.users.get(openId)?.user.displayName,
-        logger,
-      }),
+      userNames: get(TOKENS.FEISHU_USER_NAMES),
       store: {
         hasDedupKey: (chatId, dedupKey) => hasEventDedupKey(db, chatId, dedupKey),
         persist: (event, dedupKey) => persistDedupedEvent(db, event, dedupKey),
@@ -46,6 +52,7 @@ export const registerFeishu = ({ get, register }: Registrar): void => {
       botInfo: get(TOKENS.FEISHU_BOT_IDENTITY).info,
       acceptSelfSent: get(TOKENS.FEISHU_INGRESS).acceptSelfSent,
       messageExists: (chatId, messageId) => canonicalMessageExists(db, chatId, messageId),
+      isKnownParticipant: (chatId, openId) => get(TOKENS.FEISHU_USER_NAMES).isKnown(chatId, openId),
       logger: get(TOKENS.LOGGER),
     });
   });

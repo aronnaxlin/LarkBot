@@ -99,6 +99,13 @@ describe('Feishu platform wiring', () => {
         { type: 'message', messageId: 'om_1', sender: { id: 'ou_synthetic_alice', displayName: 'Alice' } },
       ]);
       expect(handleEvent).toHaveBeenCalledWith(CHAT, expect.any(Array));
+      // Feishu chatlogs carry the sender open_id, which outgoing mentions copy.
+      const [, rendered] = handleEvent.mock.calls.at(-1) as [string, Array<{ content: Array<{ type: string; text?: string }> }>];
+      expect(rendered[0]!.content[0]!.text).toContain('uid="ou_synthetic_alice"');
+      // Ingress and the driver platform share one participant cache.
+      const userNames = container.get(TOKENS.FEISHU_USER_NAMES);
+      expect(userNames.isKnown(CHAT, 'ou_synthetic_alice')).toBe(true);
+      expect(userNames.isKnown(CHAT, 'ou_synthetic_stranger')).toBe(false);
       await runtime.stop();
       expect(tdl.configure).not.toHaveBeenCalled();
       expect(tdl.createClient).not.toHaveBeenCalled();

@@ -4,25 +4,12 @@ import type { Logger } from '@guiiai/logg';
 
 import { FeishuApiError } from './api';
 import type { FeishuApi } from './api';
+import { buildPostContent } from './post-content';
 import { createFeishuReactions } from './reactions';
 import type { CanonicalMessageEvent } from '../adaptation/types';
 import type { DriverPlatform } from '../driver/platform';
 
-// Feishu caps post/card request bodies at 30 KB. Leave headroom for the other
-// request fields rather than letting the server reject the call.
-const MAX_POST_CONTENT_BYTES = 28 * 1024;
 const DEFAULT_RETRY_DELAYS_MS = [1000, 3000];
-
-// Markdown is sent as a single `md` element of a `post` message; Feishu renders
-// CommonMark + GFM there. Telegram-only syntax (e.g. spoilers) is not converted.
-export const buildPostContent = (markdown: string): string => {
-  if (markdown.trim() === '') throw new Error('Message text is empty.');
-  const content = JSON.stringify({ zh_cn: { content: [[{ tag: 'md', text: markdown }]] } });
-  const bytes = Buffer.byteLength(content);
-  if (bytes > MAX_POST_CONTENT_BYTES)
-    throw new Error(`Message is too long for Feishu (${bytes} bytes encoded; limit ${MAX_POST_CONTENT_BYTES}). Split it into several shorter messages.`);
-  return content;
-};
 
 const sleep = (ms: number) => new Promise<void>(resolve => setTimeout(resolve, ms));
 
@@ -31,6 +18,9 @@ export const createFeishuDriverPlatform = (deps: {
   botInfo: () => { openId: string; name: string };
   acceptSelfSent: (event: CanonicalMessageEvent) => void;
   messageExists: (chatId: string, messageId: string) => boolean;
+  // Whether an open_id belongs to a participant seen in this chat; outgoing
+  // mentions of anyone else are rejected before the send.
+  isKnownParticipant: (chatId: string, openId: string) => boolean;
   logger: Logger;
   retryDelaysMs?: readonly number[];
   newUuid?: () => string;
@@ -65,7 +55,7 @@ export const createFeishuDriverPlatform = (deps: {
     sendMessage: async (chatId, text, replyToMessageId, attachments) => {
       if (attachments != null && attachments.length > 0)
         throw new Error('Feishu attachments are not supported yet.');
-      const content = buildPostContent(text);
+      const { content, nodes } = buildPostContent(text, openId => deps.isKnownParticipant(chatId, openId));
       const sent = await sendWithRetry({ chatId, replyToMessageId, content, uuid: newUuid() });
 
       const bot = deps.botInfo();
@@ -78,7 +68,7 @@ export const createFeishuDriverPlatform = (deps: {
         receivedAtMs,
         timestampSec: Math.floor(sent.createTimeMs / 1000),
         utcOffsetMin: -new Date(receivedAtMs).getTimezoneOffset(),
-        content: [{ type: 'text', text }],
+        content: nodes,
         attachments: [],
         isSelfSent: true,
       };

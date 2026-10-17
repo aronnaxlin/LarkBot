@@ -22,6 +22,16 @@ Menci has granted permission for this private, non-commercial adaptation. That p
 - Bounded tool execution for timely conversation, with isolated Bash and browser access when needed.
 - Feishu context lookup through CLI/Skills or MCP, alongside the existing context compaction mechanism.
 
+## Setup
+
+```sh
+pnpm install
+cp config.example.yaml config.yaml     # then fill in models and chat ids
+cp prompts/IDENTITY.example.md prompts/IDENTITY.md   # then write the bot's persona
+```
+
+`prompts/IDENTITY.md` is deployment-local and gitignored (`prompts/.gitignore`); `prompts/IDENTITY.example.md` is the tracked neutral template showing the expected sections. Replace its sample text with your own persona and delete its one template comment. Both are loaded through the chat's `systemFiles` list in `config.yaml`.
+
 ## Development
 
 The inherited implementation uses TypeScript, Node.js >=22, pnpm, and SQLite. See the implementation notes for the current scope, configuration, and remaining limitations. Browser isolation, per-person long-term memory, and maintainer authorization are still planned; the inherited Bash tool is not automatically sandboxed:

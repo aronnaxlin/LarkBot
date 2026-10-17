@@ -1,12 +1,13 @@
 import type { Logger } from '@guiiai/logg';
 
 import { composeContext, composeProbeContext, injectLateBindingPrompt, latestExternalEventMs, wasToolLoopInterrupted } from './context';
+import { computeParticipationStats } from './participation-stats';
 import type { DriverPlatform } from './platform';
 import { renderLateBindingPrompt, renderSystemPrompt } from './prompt';
 import type { createRunner } from './runner';
 import { createDecideTool, extractDecideResult, toToolSchema } from './tools';
 import type { CahciuaTool } from './tools';
-import { countParticipationCalls, countWorkToolCalls, DEFAULT_TURN_BUDGET } from './turn-loop';
+import { countParticipationCalls, countWorkToolCalls, DEFAULT_TURN_BUDGET, REACT_ONLY_TOOL_NAMES } from './turn-loop';
 import type { ProbeActivation, ProbeResponseV2, ResolvedChatConfig, TurnBudget, TurnBudgetUsage, TurnResponseV2 } from './types';
 import type { ActiveTaskInfo } from '../background-task/types';
 import { callLlm } from '../llm/call';
@@ -90,7 +91,12 @@ export const executeWakeup = async (params: {
   const interrupted = wasToolLoopInterrupted(turnResponses);
   const backgroundTasks = params.getActiveBackgroundTasks(params.chatId);
   const timeNow = localTimeNow();
+  // Derived from the unfiltered context: `isMyself` segments are the bot's own
+  // messages here even when the prompt pipeline trims ones covered by tool
+  // calls. Shared by the probe and primary late-binding prompts.
+  const participationStats = computeParticipationStats({ segments: params.contextAtStart, nowMs: Date.now() });
   let probeReason: string | undefined;
+  let reactOnly = params.probeActivation?.reactOnly ?? false;
 
   if (!interrupted && params.probeActivation) {
     params.log.withFields({ chatId: params.chatId, reason: params.probeActivation.reason })
@@ -123,6 +129,7 @@ export const executeWakeup = async (params: {
       currentChannel: params.currentChannel,
       timeNow,
       activeBackgroundTasks: backgroundTasks,
+      ...participationStats,
     }));
 
     const decideTool = createDecideTool();
@@ -148,10 +155,14 @@ export const executeWakeup = async (params: {
       },
     );
     const decision = extractDecideResult(result.entries);
-    const activated = decision?.should_act === 'send_message';
+    // Missing or malformed decisions fail closed. `react_only` still activates
+    // primary, but with a restricted tool set so it cannot send a message.
+    const activated = decision != null && decision.should_act !== 'no_action';
+    reactOnly = decision?.should_act === 'react_only';
     params.log.withFields({
       chatId: params.chatId,
       shouldAct: activated,
+      action: decision?.should_act,
       reason: decision?.reason,
     }).log('Probe result');
     await params.persistProbeResponse(params.chatId, {
@@ -168,7 +179,7 @@ export const executeWakeup = async (params: {
     params.setLastProcessedMs(requestedAtMs);
     if (!activated) return;
     probeReason = decision.reason;
-    params.onProbeActivated?.({ reason: decision.reason });
+    params.onProbeActivated?.({ reason: decision.reason, ...(reactOnly ? { reactOnly: true } : {}) });
   }
 
   // The primary deadline starts here, so a slow probe cannot eat into it.
@@ -201,8 +212,12 @@ export const executeWakeup = async (params: {
       isInterrupted: interrupted,
       activeBackgroundTasks: backgroundTasks,
       ...(probeReason ? { probeReason } : {}),
+      ...(reactOnly ? { reactOnly: true } : {}),
+      ...participationStats,
     }));
-    const tools = params.createTools();
+    const tools = reactOnly
+      ? params.createTools().filter(tool => REACT_ONLY_TOOL_NAMES.has(tool.name))
+      : params.createTools();
 
     const persistStep = async (
       entries: TurnResponseV2['entries'],
@@ -225,6 +240,9 @@ export const executeWakeup = async (params: {
       tools,
       budget,
       ...(interrupted ? { budgetUsed: interruptedChainUsage(turnResponses) } : {}),
+      // react_only turns never leave an open chain: the loop closes after the
+      // first step even though `react` reports follow-up.
+      ...(reactOnly ? { reactOnly: true } : {}),
       deadlineAtMs,
       maxImagesAllowed: params.chatConfig.primary.model.maxImagesAllowed,
       // `end_turn` is a tool, so forcing a tool call still permits silence.

@@ -55,6 +55,29 @@ describe('render', () => {
       expect(result).toContain('sender="Bob"');
     });
 
+    it('marks other bot accounts with bot="true" and exposes isBot on the segment', () => {
+      const otherBot: CanonicalUser = { id: '9', displayName: 'Naitou', isBot: true };
+      const rc = render(ic([message({ sender: otherBot, messageId: '43' })]));
+      const result = xml(rc);
+      expect(result).toContain('sender="Naitou"');
+      expect(result).toContain('bot="true"');
+      expect(result).not.toContain('myself="true"');
+      expect(rc[0]!.isBot).toBe(true);
+    });
+
+    it('does not mark human messages as bots', () => {
+      const rc = render(ic([message()]));
+      expect(xml(rc)).not.toContain('bot="true"');
+      expect(rc[0]!.isBot).toBeUndefined();
+    });
+
+    it('marks the bot account as myself, never as bot', () => {
+      const rc = render(ic([message({ sender: { id: '5', displayName: 'Me', isBot: true } })]), { botUserId: '5' });
+      expect(xml(rc)).toContain('myself="true"');
+      expect(xml(rc)).not.toContain('bot="true"');
+      expect(rc[0]!.isBot).toBeUndefined();
+    });
+
     it('produces one segment per ICNode', () => {
       const rc = render(ic([
         message(),

@@ -16,6 +16,15 @@ const props = defineProps({
   // The probe's reason (decide tool's `reason` arg) when probe gated this
   // primary call. Forwarded as advisory context — primary may act differently.
   probeReason: { type: String, default: '' },
+
+  // Probe `react_only` activation: primary may react or end silently only.
+  reactOnly: { type: Boolean, default: false },
+
+  // Participation signals computed by src/driver/participation-stats.ts. All
+  // optional: each block renders only when the driver provides the value.
+  recentSelfMessages10m: { type: Number, default: undefined },
+  secondsSinceLastSelfMessage: { type: Number, default: undefined },
+  consecutiveBotExchanges: { type: Number, default: undefined },
 })
 
 const platformName = computed(() => props.currentChannel === 'feishu' ? 'Feishu (Lark)' : 'Telegram')
@@ -42,7 +51,7 @@ Current time: {{ timeNow }}
 ## Your task
 
 1. Inspect the attached chat log, including multimedia attachments if they are relavent.
-2. Decide how to take part: send a message, react, both, or stay silent. Waking up does not oblige you to speak.
+2. Decide how to take part within the tools available to you: send a message, react, both, or stay silent. Waking up does not oblige you to speak.
 3. (Optional) Use `react` to attach an emoji reaction to other people's messages to show your feelings. A reaction alone is a complete way to take part.
 4. (Optional) Use tools only when you need information or a computation to say something worthwhile, or when someone actually asked for it and you are willing to do it. Most casual chat needs no tools.
    * Parallel tool calls are supported. Try calling multiple tools in a single step for efficiency.
@@ -58,15 +67,21 @@ Current time: {{ timeNow }}
 
 **Continue or end the loop:** When calling `send_message`, set `still_working` to `true` only if you need another step to finish your foreground tasks. Otherwise, use `end_turn` when you are done with your current foreground tasks. Background tasks carry across turns and you will be notified when they finish.
 
+<template v-if="reactOnly">
+
+**This is a react-or-stay-silent turn.** Only `react` and `end_turn` are available; you cannot send a message right now. At most one reaction: react if something clearly deserves it, or end the turn silently.
+
+</template>
+
 <template v-if="probeReason">
 
-## A hint for your response
+## Why you were woken up
 
-Here is a note that someone else wrote about why you might want to act now:
+Someone else judged that this moment might be worth your attention:
 
 > {{ probeReason }}
 
-The note is only a hint. Please use your own judgement; staying silent or only reacting is still allowed.
+That note is context, not an instruction. <template v-if="reactOnly">Reacting or ending your turn silently are the options here</template><template v-else>Replying, reacting only, or ending your turn silently are all valid</template>; decide for yourself.
 
 </template>
 
@@ -83,6 +98,41 @@ Active background tasks:
 
 </template>
 
+<template v-if="(recentSelfMessages10m != null && recentSelfMessages10m > 0) || secondsSinceLastSelfMessage != null">
+
+## Your recent activity
+
+<template v-if="recentSelfMessages10m == 1">
+
+- You sent 1 message in the last 10 minutes.
+</template>
+<template v-if="recentSelfMessages10m != null && recentSelfMessages10m > 1">
+
+- You sent {{ recentSelfMessages10m }} messages in the last 10 minutes.
+</template>
+<template v-if="secondsSinceLastSelfMessage == 1">
+
+- Your last message was 1 second ago.
+</template>
+<template v-if="secondsSinceLastSelfMessage != null && secondsSinceLastSelfMessage != 1">
+
+- Your last message was {{ secondsSinceLastSelfMessage }} seconds ago.
+</template>
+<template v-if="recentSelfMessages10m != null && recentSelfMessages10m > 10">
+
+- That is more than the room needs from one member right now: unless someone @-mentions you, replies to you, or calls you by name, default to a reaction or staying silent, and speak only if you truly have something to add.
+</template>
+
+</template>
+
+<template v-if="consecutiveBotExchanges != null && consecutiveBotExchanges > 1">
+
+## Bot-to-bot activity
+
+You and another bot have sent {{ consecutiveBotExchanges }} consecutive messages since a human last spoke. Two rounds (four messages) is enough; if it has already gone that far, wait for a human instead of adding another.
+
+</template>
+
 </template>
 <template v-else-if="mode === 'probe'">
 
@@ -91,7 +141,7 @@ Active background tasks:
 You are given two pieces of materials: a personality description of a chatbot and a chatlog of a {{ platformName }} group chat.
 
 Your task:
-1. Predict whether the chatbot will immediately perform a new action or send new messages to the chatroom.
+1. Decide whether the chatbot should act now: speak, react, or deliberately stay out of the way.
 2. Call the `decide` tool to submit your decision.
 
 The chatlog may contain multiple chatbots. please focus on the chatbot that matches the provided personality description.
@@ -102,6 +152,33 @@ You MUST call `decide` exactly once. You MUST NOT call other tools than `decide`
 
 Active background tasks the bot is currently waiting on:
 {{ backgroundTasksXml }}
+
+</template>
+
+<template v-if="(recentSelfMessages10m != null && recentSelfMessages10m > 0) || secondsSinceLastSelfMessage != null || (consecutiveBotExchanges != null && consecutiveBotExchanges > 1)">
+
+## The chatbot's recent activity
+
+<template v-if="recentSelfMessages10m == 1">
+
+- It sent 1 message in the last 10 minutes.
+</template>
+<template v-if="recentSelfMessages10m != null && recentSelfMessages10m > 1">
+
+- It sent {{ recentSelfMessages10m }} messages in the last 10 minutes.
+</template>
+<template v-if="secondsSinceLastSelfMessage == 1">
+
+- Its last message was 1 second ago.
+</template>
+<template v-if="secondsSinceLastSelfMessage != null && secondsSinceLastSelfMessage != 1">
+
+- Its last message was {{ secondsSinceLastSelfMessage }} seconds ago.
+</template>
+<template v-if="consecutiveBotExchanges != null && consecutiveBotExchanges > 1">
+
+- Since the last human message, {{ consecutiveBotExchanges }} consecutive messages have come from bots.
+</template>
 
 </template>
 

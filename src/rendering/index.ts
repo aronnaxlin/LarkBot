@@ -112,9 +112,12 @@ const hasMention = (nodes: ContentNode[], userId: string): boolean =>
 
 // --- ICNode → content pieces ---
 
-const renderMessage = (msg: ICMessage, params: RenderParams): { content: RenderedContentPiece[]; senderId?: string; isMyself: boolean; isSelfSent: boolean; mentionsMe: boolean; repliesToMe: boolean } => {
+const renderMessage = (msg: ICMessage, params: RenderParams): { content: RenderedContentPiece[]; senderId?: string; isMyself: boolean; isSelfSent: boolean; isBot: boolean; mentionsMe: boolean; repliesToMe: boolean } => {
   const isMyself = !!(params.botUserId && msg.sender?.id === params.botUserId);
   const isSelfSent = !!msg.isSelfSent;
+  // Another bot in the chat. Self messages are marked `myself="true"` instead,
+  // so the two never collide even though this bot is also a bot account.
+  const isBot = !isMyself && msg.sender?.isBot === true;
   const isBlocked = !!(msg.sender?.id && params.blockedUserIds?.has(msg.sender.id));
   // Blocked senders can't reach the bot — suppress mention / reply-to-bot
   // triggers regardless of content, so the message can't sneak past the probe gate.
@@ -129,6 +132,7 @@ const renderMessage = (msg: ICMessage, params: RenderParams): { content: Rendere
     if (params.senderUid) attrs.push(`uid="${escapeXml(msg.sender.id)}"`);
   }
   if (isMyself) attrs.push('myself="true"');
+  if (isBot) attrs.push('bot="true"');
   attrs.push(`t="${formatTimestamp(msg.timestampSec, msg.utcOffsetMin)}"`);
 
   if (msg.editedAtSec != null)
@@ -149,12 +153,12 @@ const renderMessage = (msg: ICMessage, params: RenderParams): { content: Rendere
   // the original content (it was never dropped from the DB).
   if (isBlocked) {
     attrs.push('blocked="true"');
-    return { content: [{ type: 'text', text: `<message ${attrs.join(' ')}/>` }], senderId: msg.sender?.id, isMyself, isSelfSent, mentionsMe, repliesToMe };
+    return { content: [{ type: 'text', text: `<message ${attrs.join(' ')}/>` }], senderId: msg.sender?.id, isMyself, isSelfSent, isBot, mentionsMe, repliesToMe };
   }
 
   if (msg.deleted) {
     attrs.push('deleted="true"');
-    return { content: [{ type: 'text', text: `<message ${attrs.join(' ')}/>` }], senderId: msg.sender?.id, isMyself, isSelfSent, mentionsMe, repliesToMe };
+    return { content: [{ type: 'text', text: `<message ${attrs.join(' ')}/>` }], senderId: msg.sender?.id, isMyself, isSelfSent, isBot, mentionsMe, repliesToMe };
   }
 
   const parts: string[] = [];
@@ -190,7 +194,7 @@ const renderMessage = (msg: ICMessage, params: RenderParams): { content: Rendere
       pieces.push({ type: 'image', image: sharp(Buffer.from(att.thumbnailWebp, 'base64')) });
   }
 
-  return { content: pieces, senderId: msg.sender?.id, isMyself, isSelfSent, mentionsMe, repliesToMe };
+  return { content: pieces, senderId: msg.sender?.id, isMyself, isSelfSent, isBot, mentionsMe, repliesToMe };
 };
 
 const renderSystemEvent = (event: ICSystemEvent, contactNames?: Map<string, string>): string => {
@@ -264,8 +268,8 @@ export const render = (ic: IntermediateContext, params: RenderParams = {}): Rend
     if (params.compactCursorMs != null && node.receivedAtMs < params.compactCursorMs) continue;
 
     if (node.type === 'message') {
-      const { content, senderId, isMyself, isSelfSent, mentionsMe, repliesToMe } = renderMessage(node, params);
-      segments.push({ receivedAtMs: node.receivedAtMs, content, ...(senderId && { senderId }), ...(isMyself && { isMyself }), ...(isSelfSent && { isSelfSent }), ...(mentionsMe && { mentionsMe }), ...(repliesToMe && { repliesToMe }) });
+      const { content, senderId, isMyself, isSelfSent, isBot, mentionsMe, repliesToMe } = renderMessage(node, params);
+      segments.push({ receivedAtMs: node.receivedAtMs, content, ...(senderId && { senderId }), ...(isMyself && { isMyself }), ...(isSelfSent && { isSelfSent }), ...(isBot && { isBot }), ...(mentionsMe && { mentionsMe }), ...(repliesToMe && { repliesToMe }) });
     } else if (node.type === 'runtime_event') {
       const content = [{ type: 'text' as const, text: renderRuntimeEvent(node) }];
       segments.push({ receivedAtMs: node.receivedAtMs, content, isRuntimeEvent: true });

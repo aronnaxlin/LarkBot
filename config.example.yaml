@@ -74,6 +74,8 @@ chats:
       # timeoutSec applies if lower. Timeouts/5xx/network errors are retried.
       timeoutMs: 15000
     systemFiles:
+      # Copy prompts/IDENTITY.example.md to prompts/IDENTITY.md and edit it.
+      # IDENTITY.md is deployment-local and gitignored; see prompts/.gitignore.
       - "prompts/IDENTITY.md"
       - "prompts/style-enforcements.md"
     sendTypingAction: true

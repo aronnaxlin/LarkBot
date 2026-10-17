@@ -60,8 +60,10 @@ export interface TurnBudget {
 
 // A probe that activated primary for a context whose primary then failed
 // transiently; a retry of that same context reuses it instead of re-judging.
+// `reactOnly` wakes primary with only the `react` and `end_turn` tools exposed.
 export interface ProbeActivation {
   reason: string;
+  reactOnly?: boolean;
 }
 
 export interface TurnBudgetUsage {

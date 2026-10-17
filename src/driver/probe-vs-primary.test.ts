@@ -12,7 +12,7 @@ vi.mock('../llm/call', async importOriginal => {
 import { createDriver } from './index';
 import { DEFAULT_PROBE_TIMEOUT_MS } from './turn-budget';
 import { DEFAULT_TURN_BUDGET } from './turn-loop';
-import type { TurnResponseV2 } from './types';
+import type { ProbeResponseV2, TurnResponseV2 } from './types';
 import type { ResolvedChatConfig } from '../config/config';
 import { callLlm } from '../llm/call';
 import type { RenderedContext } from '../rendering/types';
@@ -106,6 +106,64 @@ const collectAssistantToolCallNames = (entries: ConversationEntry[]): string[] =
     e.kind === 'message' && e.role === 'assistant'
       ? e.parts.flatMap(p => p.kind === 'toolCall' ? [p.name] : [])
       : []);
+
+// Shared driver deps for the react_only turn tests: records persisted TRs/probes,
+// platform sends and reactions so each test only wires the mocked model output.
+const makeReactOnlyHarness = () => {
+  const persistedTRs: TurnResponseV2[] = [];
+  const persistedProbes: ProbeResponseV2[] = [];
+  const sendMessageCalls: string[] = [];
+  const reactions: string[] = [];
+  const deps: Parameters<typeof createDriver>[1] = {
+    name: 'telegram',
+    loadTurnResponses: async () => [...persistedTRs],
+    persistTurnResponse: async (_, tr) => { persistedTRs.push(tr); },
+    persistProbeResponse: async (_, probe) => { persistedProbes.push(probe); },
+    sendMessage: async (_chatId, text) => { sendMessageCalls.push(text); return { messageId: '999' }; },
+    banSpammer: async () => ({ status: 'rejected' as const, reason: 'unknown_message' as const }),
+    setMessageReaction: async (_chatId, _messageId, emoji) => { reactions.push(emoji ?? ''); },
+    sendTypingAction: async () => {},
+    onDebounceStateChange: () => {},
+    loadCompaction: () => null,
+    loadLastProbeTime: () => 0,
+    persistCompaction: () => {},
+    setCompactCursor: () => [],
+    getChatTitle: () => 'Test',
+    runtimeConfig: { shell: ['/bin/bash', '-c'], writeFile: ['cat'], readFile: ['cat'], writeFileSizeLimit: 1024, readFileSizeLimit: 1024 },
+    loadMessageAttachments: () => undefined,
+    messageExists: () => true,
+    downloadMessageMedia: async () => undefined,
+    readOldMessages: () => '',
+    resolveModel: () => ({ apiBaseUrl: 'mock', apiKey: 'k', model: 'mock', apiFormat: 'openai-chat' }),
+    backgroundTask: {
+      startTask: () => 0,
+      killTask: () => ({ ok: true }),
+      getActiveTasks: () => [],
+      readTaskOutput: async () => ({ content: '', totalLines: 0, truncated: false }),
+    },
+    logger,
+  };
+  return { persistedTRs, persistedProbes, sendMessageCalls, reactions, deps };
+};
+
+const reactOnlyProbe = () => ({
+  entries: [{
+    kind: 'message' as const, role: 'assistant' as const, reasoning: undefined,
+    parts: [{
+      kind: 'toolCall' as const, callId: 'p1', name: 'decide',
+      args: JSON.stringify({ should_act: 'react_only', reason: 'too talkative; a reaction is enough' }),
+    }],
+  }],
+  usage: { inputTokens: 10, outputTokens: 5, cacheReadTokens: 0, cacheWriteTokens: 0 },
+});
+
+const primaryReact = (callId: string) => ({
+  entries: [{
+    kind: 'message' as const, role: 'assistant' as const, reasoning: undefined,
+    parts: [{ kind: 'toolCall' as const, callId, name: 'react', args: JSON.stringify({ message_id: '3', emoji: '😂' }) }],
+  }],
+  usage: { inputTokens: 20, outputTokens: 10, cacheReadTokens: 0, cacheWriteTokens: 0 },
+});
 
 describe('probe vs primary view of bot\'s own messages', () => {
   it('probe sees bot xml in chat history; primary sees only the assistant tool call', async () => {
@@ -221,9 +279,9 @@ describe('probe vs primary view of bot\'s own messages', () => {
     expect(primaryAssistantToolCalls).toContain('send_message');
     expect(primaryAssistantToolCalls).toContain('bash');
 
-    // Primary's late-binding embeds the probe's reason as advisory.
-    expect(primaryUserText).toContain('The note is only a hint');
-    expect(primaryUserText).toContain('staying silent or only reacting is still allowed');
+    // Primary's late-binding embeds the probe's reason as advisory context.
+    expect(primaryUserText).toContain('context, not an instruction');
+    expect(primaryUserText).toContain('Replying, reacting only, or ending your turn silently are all valid');
     expect(primaryUserText).toContain('Plausible: (a) react 👀');
 
     // Probe sees no real assistant tool calls in its context — all TRs are
@@ -370,6 +428,168 @@ describe('probe vs primary view of bot\'s own messages', () => {
     // The probe still runs and still decides, but neither request carries tool_choice.
     expect(mockCallLlm.mock.calls.map(call => call[0]!.model)).toEqual(['mock-probe', 'mock-primary']);
     expect(mockCallLlm.mock.calls.map(call => call[0]!.forceToolChoice)).toEqual([undefined, undefined]);
+
+    driver.stop();
+  });
+
+  it('react_only closes after one react step and the next message runs probe again', async () => {
+    mockCallLlm.mockReset();
+    let reactCount = 0;
+    mockCallLlm.mockImplementation(async config => config.model === 'mock-probe'
+      ? reactOnlyProbe()
+      : primaryReact(`r${++reactCount}`));
+
+    const h = makeReactOnlyHarness();
+    const driver = createDriver({ chatIds: ['-100125'], resolveChatConfig: () => makeChatConfig() }, h.deps);
+
+    driver.handleEvent('-100125', buildRC());
+    await vi.waitFor(() => expect(h.persistedTRs).toHaveLength(1), { timeout: 1000, interval: 10 });
+    await new Promise<void>(resolve => setTimeout(resolve, 20));
+
+    // `react` reports follow-up, but the react-only turn closes after one step:
+    // no second primary call, and no open requiresFollowUp result is persisted.
+    expect(mockCallLlm.mock.calls.map(call => call[0]!.model)).toEqual(['mock-probe', 'mock-primary']);
+    expect(h.persistedTRs[0]!.entries.some(entry => entry.kind === 'toolResult' && entry.requiresFollowUp)).toBe(false);
+    expect(h.reactions).toEqual(['😂']);
+    expect(h.persistedProbes[0]!.isActivated).toBe(true);
+
+    // A later message is a fresh wake-up: probe runs again, and the primary tool
+    // set never regains send_message.
+    driver.handleEvent('-100125', [{
+      receivedAtMs: Date.now(),
+      senderId: 'user1',
+      content: [{ type: 'text', text: '<message id="9" sender="Alice" t="t">lol</message>' }],
+    }]);
+    await vi.waitFor(() => expect(h.persistedTRs).toHaveLength(2), { timeout: 1000, interval: 10 });
+
+    expect(mockCallLlm.mock.calls.map(call => call[0]!.model))
+      .toEqual(['mock-probe', 'mock-primary', 'mock-probe', 'mock-primary']);
+    for (const call of mockCallLlm.mock.calls.filter(candidate => candidate[0]!.model === 'mock-primary'))
+      expect(call[3]?.map(schema => schema.name)).toEqual(['react', 'end_turn']);
+
+    driver.stop();
+  });
+
+  it('react_only rejects a hallucinated send_message and leaves no open chain', async () => {
+    mockCallLlm.mockReset();
+    let primaryCallCount = 0;
+    mockCallLlm.mockImplementation(async config => {
+      if (config.model === 'mock-probe') return reactOnlyProbe();
+      primaryCallCount++;
+      return {
+        entries: [{
+          kind: 'message' as const, role: 'assistant' as const, reasoning: undefined,
+          parts: [{ kind: 'toolCall' as const, callId: `pr${primaryCallCount}`, name: 'send_message', args: JSON.stringify({ text: 'should never be sent' }) }],
+        }],
+        usage: { inputTokens: 20, outputTokens: 10, cacheReadTokens: 0, cacheWriteTokens: 0 },
+      };
+    });
+
+    const h = makeReactOnlyHarness();
+    const driver = createDriver({ chatIds: ['-100125'], resolveChatConfig: () => makeChatConfig() }, h.deps);
+
+    driver.handleEvent('-100125', buildRC());
+    await vi.waitFor(() => expect(h.persistedTRs).toHaveLength(1), { timeout: 1000, interval: 10 });
+    await new Promise<void>(resolve => setTimeout(resolve, 20));
+
+    expect(primaryCallCount).toBe(1);
+    expect(JSON.stringify(h.persistedTRs[0]!.entries)).toContain('Unknown tool: send_message');
+    expect(h.persistedTRs[0]!.entries.some(entry => entry.kind === 'toolResult' && entry.requiresFollowUp)).toBe(false);
+    expect(h.sendMessageCalls).toEqual([]);
+    expect(collectUserText(mockCallLlm.mock.calls[1]![1])).toContain('react-or-stay-silent turn');
+
+    // The rejection closed the turn, so the next message still goes through probe.
+    driver.handleEvent('-100125', [{
+      receivedAtMs: Date.now(),
+      senderId: 'user1',
+      content: [{ type: 'text', text: '<message id="10" sender="Alice" t="t">hello?</message>' }],
+    }]);
+    await vi.waitFor(() => expect(h.persistedTRs).toHaveLength(2), { timeout: 1000, interval: 10 });
+    expect(mockCallLlm.mock.calls.map(call => call[0]!.model))
+      .toEqual(['mock-probe', 'mock-primary', 'mock-probe', 'mock-primary']);
+
+    driver.stop();
+  });
+
+  it('feeds participation stats into both late-binding prompts and omits them when inapplicable', async () => {
+    mockCallLlm.mockReset();
+    mockCallLlm.mockImplementation(async config => ({
+      entries: [{
+        kind: 'message', role: 'assistant', reasoning: undefined,
+        parts: [config.model === 'mock-probe'
+          ? { kind: 'toolCall', callId: 'p1', name: 'decide', args: JSON.stringify({ should_act: 'send_message', reason: 'addressed' }) }
+          : { kind: 'toolCall', callId: 'pr1', name: 'end_turn', args: '{}' }],
+      }],
+      usage: { inputTokens: 10, outputTokens: 5, cacheReadTokens: 0, cacheWriteTokens: 0 },
+    }));
+
+    const now = Date.now();
+    const busyRc: RenderedContext = [
+      { receivedAtMs: now - 120_000, senderId: 'bot', isMyself: true, isSelfSent: true, content: [{ type: 'text', text: '<message id="a" sender="Me" myself="true" t="t">hi</message>' }] },
+      { receivedAtMs: now - 60_000, senderId: 'bot', isMyself: true, isSelfSent: true, content: [{ type: 'text', text: '<message id="b" sender="Me" myself="true" t="t">again</message>' }] },
+      { receivedAtMs: now - 30_000, senderId: 'other-bot', isBot: true, content: [{ type: 'text', text: '<message id="c" sender="Naitou" bot="true" t="t">hello</message>' }] },
+      { receivedAtMs: now - 10_000, senderId: 'other-bot-2', isBot: true, content: [{ type: 'text', text: '<message id="d" sender="Doudou" bot="true" t="t">hi</message>' }] },
+    ];
+
+    const persistedTRs: TurnResponseV2[] = [];
+
+    const driver = createDriver(
+      { chatIds: ['-100126'], resolveChatConfig: () => makeChatConfig() },
+      {
+        name: 'telegram',
+        loadTurnResponses: async () => [...persistedTRs],
+        persistTurnResponse: async (_, tr) => { persistedTRs.push(tr); },
+        persistProbeResponse: async () => {},
+        sendMessage: async () => ({ messageId: '999' }),
+        banSpammer: async () => ({ status: 'rejected' as const, reason: 'unknown_message' as const }),
+        setMessageReaction: async () => {},
+        sendTypingAction: async () => {},
+        onDebounceStateChange: () => {},
+        loadCompaction: () => null,
+        loadLastProbeTime: () => 0,
+        persistCompaction: () => {},
+        setCompactCursor: () => [],
+        getChatTitle: () => 'Test',
+        runtimeConfig: { shell: ['/bin/bash', '-c'], writeFile: ['cat'], readFile: ['cat'], writeFileSizeLimit: 1024, readFileSizeLimit: 1024 },
+        loadMessageAttachments: () => undefined,
+        messageExists: () => true,
+        downloadMessageMedia: async () => undefined,
+        readOldMessages: () => '',
+        resolveModel: () => ({ apiBaseUrl: 'mock', apiKey: 'k', model: 'mock', apiFormat: 'openai-chat' }),
+        backgroundTask: {
+          startTask: () => 0,
+          killTask: () => ({ ok: true }),
+          getActiveTasks: () => [],
+          readTaskOutput: async () => ({ content: '', totalLines: 0, truncated: false }),
+        },
+        logger,
+      },
+    );
+
+    driver.handleEvent('-100126', busyRc);
+    await vi.waitFor(() => expect(persistedTRs).toHaveLength(1), { timeout: 1000, interval: 10 });
+
+    const probeText = collectUserText(mockCallLlm.mock.calls[0]![1]);
+    const primaryText = collectUserText(mockCallLlm.mock.calls[1]![1]);
+    expect(probeText).toContain('It sent 2 messages in the last 10 minutes.');
+    expect(primaryText).toContain('You sent 2 messages in the last 10 minutes.');
+    expect(probeText).toContain('4 consecutive messages have come from bots.');
+    expect(primaryText).toContain('Bot-to-bot activity');
+
+    // A context with no self messages and no other bots renders neither block.
+    mockCallLlm.mockClear();
+    await new Promise<void>(resolve => setTimeout(resolve, 20));
+    driver.handleEvent('-100126', [{
+      receivedAtMs: Date.now(),
+      senderId: 'user1',
+      content: [{ type: 'text', text: '<message id="e" sender="Alice" t="t">hello?</message>' }],
+    }]);
+    await vi.waitFor(() => expect(mockCallLlm).toHaveBeenCalledTimes(2), { timeout: 1000, interval: 10 });
+    const quietProbeText = collectUserText(mockCallLlm.mock.calls[0]![1]);
+    const quietPrimaryText = collectUserText(mockCallLlm.mock.calls[1]![1]);
+    expect(quietProbeText).not.toContain("The chatbot's recent activity");
+    expect(quietPrimaryText).not.toContain('Your recent activity');
+    expect(quietPrimaryText).not.toContain('Bot-to-bot activity');
 
     driver.stop();
   });

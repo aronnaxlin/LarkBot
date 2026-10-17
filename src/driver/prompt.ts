@@ -50,6 +50,13 @@ export const renderLateBindingPrompt = async (params: {
   isInterrupted?: boolean;
   activeBackgroundTasks?: { id: number; typeName: string; intention?: string; liveSummary: string; startedMs: number; timeoutMs: number }[];
   probeReason?: string;
+  // Probe `react_only` activation: primary may react or end silently only.
+  reactOnly?: boolean;
+  // Participation signals from computeParticipationStats; blocks render only
+  // when the driver provides the value.
+  recentSelfMessages10m?: number;
+  secondsSinceLastSelfMessage?: number;
+  consecutiveBotExchanges?: number;
 }) => {
   const { rendered } = await renderMarkdownString(lateBindingTemplate, params, basePath);
   return cleanVelinOutput(rendered);

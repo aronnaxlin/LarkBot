@@ -11,8 +11,6 @@ This project is based on [Cahciua (菜花)](https://github.com/Menci/Cahciua) by
 
 Because substantial changes are planned and the direction differs from upstream, this project is currently maintained as a separate repository rather than a GitHub fork. This does not change its origin or the credit due to the original author.
 
-Menci has granted permission for this private, non-commercial adaptation. That permission is not a license grant to third parties; any future distribution must follow the applicable permissions and license terms.
-
 ## Planned Direction
 
 - Feishu/Lark integration first, with room for other chat platforms later.
@@ -47,3 +45,7 @@ Architecture and contributor documentation:
 - [Project discussion notes (Chinese)](docs/项目讨论记录.md)
 
 Do not commit credentials, local databases, sessions, or model request dumps.
+
+## License
+
+LarkBot is released under the [MIT License](LICENSE). It is derived from [Cahciua](https://github.com/Menci/Cahciua), which is MIT-licensed by Menci; the original copyright notice is retained in `LICENSE`.

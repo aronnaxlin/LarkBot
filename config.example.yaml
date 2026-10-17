@@ -75,12 +75,26 @@ chats:
         maxParticipationCalls: 3 # combined sends/reactions; end_turn is exempt
         deadlineMs: 15000 # from primary start, probe excluded; does not abort an in-flight tool
         minModelCallMs: 2000 # must be less than deadlineMs
+      # Replay provider reasoning only for this many newest turn responses, plus
+      # the current interrupted tool chain (Anthropic requires its thinking
+      # blocks). Older reasoning is dropped from the request, not from storage.
+      reasoningReplayTurns: 3
     probe:
       # Probe is mandatory. Omit model to reuse the primary endpoint.
       model: "probe"
       # Probe HTTP bound, independent of the primary deadline; the model's
       # timeoutSec applies if lower. Timeouts/5xx/network errors are retried.
       timeoutMs: 15000
+      # Estimated-token cap for the probe's recent slice. The slice holds the
+      # chat since the bot last acted (its latest own message or primary
+      # turn); a no_action probe does not advance that boundary. It grows
+      # from half this cap to the cap, then the window start jumps forward,
+      # so the request prefix stays cache-stable between jumps.
+      contextEstTokens: 20000
+      # The compaction summary is always included and does not count against
+      # contextEstTokens. It is capped separately and truncated from the end
+      # (deep history) rather than dropped.
+      summaryMaxEstTokens: 20000
     systemFiles:
       # Copy prompts/IDENTITY.example.md to prompts/IDENTITY.md and edit it.
       # IDENTITY.md is deployment-local and gitignored; see prompts/.gitignore.
@@ -97,6 +111,9 @@ chats:
     compaction:
       maxContextEstTokens: 200000
       workingWindowEstTokens: 8000
+      # Optional dedicated summarization endpoint. A ~200K-token compaction
+      # took about 2 minutes live, so give its model entry timeoutSec >= 300
+      # (the primary model's own timeoutSec is separate).
       # model: "primary"
 
     imageToText:

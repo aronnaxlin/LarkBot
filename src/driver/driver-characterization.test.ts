@@ -40,6 +40,7 @@ const makeChatConfig = (): ResolvedChatConfig => ({
   primary: {
     model: { apiBaseUrl: 'mock', apiKey: 'key', model: 'mock-primary', apiFormat: 'openai-chat' },
     turnBudget: DEFAULT_TURN_BUDGET,
+    reasoningReplayTurns: 3,
   },
   systemFiles: [],
   sendTypingAction: false,
@@ -49,6 +50,8 @@ const makeChatConfig = (): ResolvedChatConfig => ({
   probe: {
     model: { apiBaseUrl: 'mock', apiKey: 'key', model: 'mock-probe', apiFormat: 'openai-chat' },
     timeoutMs: DEFAULT_PROBE_TIMEOUT_MS,
+    contextEstTokens: 20000,
+    summaryMaxEstTokens: 20000,
   },
   imageToText: { enabled: false, maxConcurrency: 1 },
   animationToText: { enabled: false, maxFrames: 0, maxConcurrency: 1 },

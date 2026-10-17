@@ -1,40 +1,80 @@
 import { mergeContext } from './merge';
 import type { TurnResponseV2 } from './types';
-import type { RenderedContext } from '../rendering/types';
-import { stripReasoning } from '../unified-api/reasoning';
+import type { RenderedContext, RenderedContextSegment } from '../rendering/types';
+import { messageReasoningText, stripReasoning } from '../unified-api/reasoning';
 import type {
   ConversationEntry,
   InputMessage,
   InputPart,
+  MessageReasoning,
   OutputMessage,
+  ReasoningData,
   ToolResult,
 } from '../unified-api/types';
 
-// ~2 chars per token for mixed CJK/English/XML.
+// Calibrated against live DeepSeek requests (2026-10-17): the primary request
+// held ~532K text/reasoning chars → 262,248 input tokens and the probe ~416K
+// chars → 205,322 (~2.0 chars/token aggregate). Mixed CJK/XML ids/English
+// balance out, so one blended rate is closer to the provider tokenizer than
+// separate CJK/ASCII rates.
 const CHARS_PER_TOKEN = 2;
 // Image token estimation: thumbnails ≤ 75_000 px → ~100 tokens (Claude formula).
 const IMAGE_TOKENS = 100;
 
+const charsTokens = (chars: number): number => Math.ceil(chars / CHARS_PER_TOKEN);
+const textTokens = (text: string): number => charsTokens(text.length);
+
 const partTokens = (part: InputPart): number =>
-  part.kind === 'image' ? IMAGE_TOKENS : Math.ceil(part.text.length / CHARS_PER_TOKEN);
+  part.kind === 'image' ? IMAGE_TOKENS : textTokens(part.text);
 
 const toolResultTokens = (tr: ToolResult): number =>
   typeof tr.payload === 'string'
-    ? Math.ceil(tr.payload.length / CHARS_PER_TOKEN)
+    ? textTokens(tr.payload)
     : tr.payload.reduce((a, p) => a + partTokens(p), 0);
 
+// Reasoning is replayed on the wire (thinking blocks, reasoning_content),
+// so it must count; ignoring it undercounted the live primary turn by ~25%.
+// Opaque blobs (Anthropic signatures, OpenAI encrypted_content, redacted
+// thinking, reasoning_opaque) are base64/encrypted payloads that tokenize at
+// roughly 1 token per 4 chars, unlike the ~2 chars/token of prose and XML.
+const OPAQUE_CHARS_PER_TOKEN = 4;
+const opaqueTokens = (chars: number): number => Math.ceil(chars / OPAQUE_CHARS_PER_TOKEN);
+
+const reasoningDataTokens = (data: ReasoningData): number => {
+  if (data.source === 'openaiResponses') {
+    const { summary, encrypted_content } = data.data;
+    return summary.reduce((a, s) => a + textTokens(s.text), 0)
+      + (encrypted_content === undefined ? 0 : opaqueTokens(encrypted_content.length));
+  }
+  if (data.data.type === 'thinking') {
+    return textTokens(data.data.thinking)
+      + (data.data.signature === undefined ? 0 : opaqueTokens(data.data.signature.length));
+  }
+  return opaqueTokens(data.data.data.length);
+};
+
+const messageReasoningTokens = (r: MessageReasoning): number =>
+  textTokens(messageReasoningText(r) ?? '')
+  + (typeof r.reasoning_opaque === 'string' ? opaqueTokens(r.reasoning_opaque.length) : 0);
+
 const outputPartTokens = (part: OutputMessage['parts'][number]): number => {
-  if (part.kind === 'text') return Math.ceil(part.text.length / CHARS_PER_TOKEN);
-  if (part.kind === 'toolCall') return Math.ceil((part.name.length + part.args.length) / CHARS_PER_TOKEN);
-  if (part.kind === 'textGroup') return part.content.reduce((a, t) => a + Math.ceil(t.text.length / CHARS_PER_TOKEN), 0);
-  return 20; // reasoning — rough
+  if (part.kind === 'text') return textTokens(part.text);
+  if (part.kind === 'toolCall') return textTokens(part.name + part.args);
+  if (part.kind === 'textGroup') return part.content.reduce((a, t) => a + textTokens(t.text), 0);
+  return reasoningDataTokens(part.data);
 };
 
 const entryTokens = (e: ConversationEntry): number => {
   if (e.kind === 'toolResult') return toolResultTokens(e);
-  if (e.role === 'assistant') return e.parts.reduce((a, p) => a + outputPartTokens(p), 0);
+  if (e.role === 'assistant') {
+    const parts = e.parts.reduce((a, p) => a + outputPartTokens(p), 0);
+    return parts + (e.reasoning === undefined ? 0 : messageReasoningTokens(e.reasoning));
+  }
   return e.parts.reduce((a, p) => a + partTokens(p), 0);
 };
+
+const renderedContentTokens = (content: RenderedContextSegment['content']): number =>
+  content.reduce((a, p) => a + (p.type === 'text' ? textTokens(p.text) : IMAGE_TOKENS), 0);
 
 export const latestExternalEventMs = (rc: RenderedContext, afterMs: number): number | null => {
   let latest: number | null = null;
@@ -174,21 +214,96 @@ const trimToolResults = (trs: TurnResponseV2[]): TurnResponseV2[] => {
 const filterSelfSentSegments = (rc: RenderedContext): RenderedContext =>
   rc.filter(seg => !seg.isSelfSent);
 
+// Tools whose successful execution counts as the bot having acted. An
+// `end_turn`-only turn, a rejected call, or a call whose tool result is an
+// error must not move the probe's mandatory boundary.
+const ACTION_TOOL_NAMES: ReadonlySet<string> = new Set(['send_message', 'react']);
+
+const toolCallSucceeded = (tr: TurnResponseV2): ReadonlySet<string> => {
+  const successful = new Set<string>();
+  for (const e of tr.entries) {
+    if (e.kind !== 'toolResult' || typeof e.payload !== 'string') continue;
+    try {
+      const parsed = JSON.parse(e.payload) as unknown;
+      if (parsed !== null && typeof parsed === 'object' && (parsed as { ok?: unknown }).ok === true)
+        successful.add(e.callId);
+    } catch { /* tool results are not always JSON */ }
+  }
+  return successful;
+};
+
+const trHasAction = (tr: TurnResponseV2): boolean => {
+  const successful = toolCallSucceeded(tr);
+  if (successful.size === 0) return false;
+  return tr.entries.some(e =>
+    e.kind === 'message' && e.role === 'assistant'
+    && e.parts.some(p => p.kind === 'toolCall'
+      && ACTION_TOOL_NAMES.has(p.name) && successful.has(p.callId)));
+};
+
+// Latest time the bot actually acted: its own latest message (including
+// synthetic self-sends) or its latest primary turn that successfully sent a
+// message or reacted. Probes are judgments, not actions, and neither is a
+// silent end_turn or a failed send, so those must not move the probe window's
+// mandatory region past an unanswered direct address.
+export const lastActedAtMs = (rc: RenderedContext, trs: TurnResponseV2[]): number => {
+  let latest = 0;
+  for (const seg of rc) if (seg.isMyself && seg.receivedAtMs > latest) latest = seg.receivedAtMs;
+  for (const tr of trs) if (tr.requestedAtMs > latest && trHasAction(tr)) latest = tr.requestedAtMs;
+  return latest;
+};
+
+// A TR continues into the next one while it persisted a follow-up result. The
+// resulting suffix is the current interrupted chain; providers that require
+// thinking blocks beside pending tool_use (Anthropic) must keep its reasoning.
+const hasFollowUpResult = (tr: TurnResponseV2): boolean =>
+  tr.entries.some(e => e.kind === 'toolResult' && e.requiresFollowUp);
+
+// First TR index whose reasoning survives replay: the union of the newest
+// `keepTurns` responses and the interrupted chain suffix.
+export const reasoningKeepFrom = (trs: TurnResponseV2[], keepTurns: number): number => {
+  if (trs.length === 0) return 0;
+  let chainStart = trs.length - 1;
+  for (let i = trs.length - 2; i >= 0; i--) {
+    if (!hasFollowUpResult(trs[i]!)) break;
+    chainStart = i;
+  }
+  return Math.min(Math.max(0, trs.length - keepTurns), chainStart);
+};
+
+// The request-side view of stored TRs: reasoning is stripped from mismatched
+// models and from everything older than `keepTurns` plus the interrupted chain.
+const stripReplayReasoning = (
+  trs: TurnResponseV2[], currentModelName: string, keepTurns: number,
+): TurnResponseV2[] => {
+  const keepFrom = reasoningKeepFrom(trs, keepTurns);
+  return trs.map((tr, index) =>
+    tr.modelName === currentModelName && index >= keepFrom
+      ? tr
+      : { ...tr, entries: stripReasoning(tr.entries) });
+};
+
 /**
  * Walk backward through RC + TR timeline until budget is reached.
  * Returns receivedAtMs of the cutoff point (entries newer than it stay).
+ *
+ * When `currentModelName` is given, TR sizes use the request-side view (the
+ * same reasoning stripping as `composeContext`), so a huge replayed reasoning
+ * blob cannot alone empty the working window.
  */
 export const findWorkingWindowCursor = (
   rc: RenderedContext, trs: TurnResponseV2[], budgetTokens: number,
+  currentModelName?: string, reasoningReplayTurns = 3,
 ): number => {
   type Entry = { timeMs: number; tokens: number };
   const entries: Entry[] = [];
   for (const seg of rc) {
-    const tokens = seg.content.reduce((a, p) =>
-      a + (p.type === 'text' ? Math.ceil(p.text.length / CHARS_PER_TOKEN) : IMAGE_TOKENS), 0);
-    entries.push({ timeMs: seg.receivedAtMs, tokens });
+    entries.push({ timeMs: seg.receivedAtMs, tokens: renderedContentTokens(seg.content) });
   }
-  for (const tr of trs) {
+  const requestTRs = currentModelName === undefined
+    ? trs
+    : stripReplayReasoning(trs, currentModelName, reasoningReplayTurns);
+  for (const tr of requestTRs) {
     const tokens = tr.entries.reduce((a, e) => a + entryTokens(e), 0);
     entries.push({ timeMs: tr.requestedAtMs, tokens });
   }
@@ -206,6 +321,49 @@ export const findWorkingWindowCursor = (
     }
   }
   return entries.at(-1)!.timeMs;
+};
+
+/**
+ * Walk forward from `oldCursorMs` through the post-strip timeline (RC segments
+ * + TRs, the same view `composeContext` builds) and stop before `budgetTokens`
+ * would be exceeded. The returned cursor is the boundary after the last entry
+ * that fits, so `[oldCursorMs, cursorMs)` is what one compaction request can
+ * summarize. The first entry is included even when it alone overflows, so the
+ * cursor always advances (the caller logs that case).
+ */
+export const findCompactionCapCursor = (
+  rc: RenderedContext, trs: TurnResponseV2[], oldCursorMs: number, budgetTokens: number,
+  currentModelName: string, reasoningReplayTurns: number,
+): { cursorMs: number; estimatedTokens: number; oversizedFirst: boolean } => {
+  type Entry = { timeMs: number; tokens: number };
+  const entries: Entry[] = [];
+  for (const seg of rc) {
+    if (seg.receivedAtMs < oldCursorMs) continue;
+    entries.push({ timeMs: seg.receivedAtMs, tokens: renderedContentTokens(seg.content) });
+  }
+  for (const tr of stripReplayReasoning(trs, currentModelName, reasoningReplayTurns)) {
+    if (tr.requestedAtMs < oldCursorMs) continue;
+    entries.push({ timeMs: tr.requestedAtMs, tokens: tr.entries.reduce((a, e) => a + entryTokens(e), 0) });
+  }
+  entries.sort((a, b) => a.timeMs - b.timeMs);
+
+  let total = 0;
+  let lastIncludedMs: number | null = null;
+  let oversizedFirst = false;
+  for (const entry of entries) {
+    if (lastIncludedMs !== null && total + entry.tokens > budgetTokens) break;
+    total += entry.tokens;
+    lastIncludedMs = entry.timeMs;
+    if (total > budgetTokens) {
+      oversizedFirst = true;
+      break;
+    }
+  }
+  return {
+    cursorMs: lastIncludedMs === null ? oldCursorMs : lastIncludedMs + 1,
+    estimatedTokens: total,
+    oversizedFirst,
+  };
 };
 
 const trimEntries = (entries: ConversationEntry[], maxTokens: number): { entries: ConversationEntry[]; estimatedTokens: number } => {
@@ -251,39 +409,40 @@ export const composeContext = (
   maxTokens: number,
   currentModelName: string,
   compactSummary?: string,
+  reasoningReplayTurns = 3,
 ): { entries: ConversationEntry[]; estimatedTokens: number; rawEstimatedTokens: number } | null => {
   const effectiveRC = filterSelfSentSegments(rc);
 
-  // Strip reasoning from TRs whose modelName does not match current model.
-  // Signatures only round-trip within the same model.
-  let sanitizedTRs: TurnResponseV2[] = trs.map(tr =>
-    tr.modelName === currentModelName
-      ? tr
-      : { ...tr, entries: stripReasoning(tr.entries) });
-
-  sanitizedTRs = trimStaleNoToolCallTRs(sanitizedTRs);
-  sanitizedTRs = trimToolResults(sanitizedTRs);
+  // Strip reasoning from TRs whose modelName does not match the current model
+  // (signatures only round-trip within one model), and from all but the newest
+  // `reasoningReplayTurns` responses plus the current interrupted chain.
+  const sanitizedTRs = trimToolResults(
+    trimStaleNoToolCallTRs(
+      stripReplayReasoning(trs, currentModelName, reasoningReplayTurns),
+    ),
+  );
 
   const merged = mergeContext(effectiveRC, sanitizedTRs);
   if (merged.length === 0 && !compactSummary) return null;
 
-  const entries: ConversationEntry[] = compactSummary
-    ? [
-        { kind: 'message', role: 'user', parts: [{ kind: 'text', text: `[Conversation summary]\n${compactSummary}` }] } satisfies InputMessage,
-        ...merged,
-      ]
-    : merged;
-
   // Drop assistant messages that became empty after reasoning strip (no content,
   // no tool calls left).
-  const cleaned = entries.filter(e => {
+  const cleaned = merged.filter(e => {
     if (e.kind !== 'message' || e.role !== 'assistant') return true;
     return e.parts.length > 0;
   });
 
-  const rawEstimatedTokens = cleaned.reduce((a, e) => a + entryTokens(e), 0);
-  const trimmed = trimEntries(cleaned, maxTokens);
-  return { ...trimmed, rawEstimatedTokens };
+  // The existing summary is protected: only raw entries compete for the budget,
+  // so front trimming can never cut the summary first (which previously lost
+  // the entire old history when a compaction window overflowed the cap).
+  const summaryEntry: InputMessage | undefined = compactSummary === undefined
+    ? undefined
+    : { kind: 'message', role: 'user', parts: [{ kind: 'text', text: `[Conversation summary]\n${compactSummary}` }] };
+  const summaryTokens = summaryEntry === undefined ? 0 : entryTokens(summaryEntry);
+  const rawEstimatedTokens = cleaned.reduce((a, e) => a + entryTokens(e), 0) + summaryTokens;
+  const trimmed = trimEntries(cleaned, Math.max(0, maxTokens - summaryTokens));
+  const entries = summaryEntry === undefined ? trimmed.entries : [summaryEntry, ...trimmed.entries];
+  return { entries, estimatedTokens: trimmed.estimatedTokens + summaryTokens, rawEstimatedTokens };
 };
 
 /**
@@ -356,31 +515,199 @@ export const synthesizeToolCallSegments = (trs: TurnResponseV2[]): { receivedAtM
   return segments;
 };
 
+/** Per-chat probe window state; mutates only through the returned start. */
+export interface ProbeWindowState {
+  startMs: number | null;
+}
+
+// While the probe slice fits its budget the window start stays put, so the
+// request prefix survives message churn and keeps its provider cache entry.
+// Only when the slice grows past the budget does the start jump forward, to
+// half the budget, and the prefix changes once.
+const PROBE_WINDOW_TARGET_DIVISOR = 2;
+
+export interface ProbeWindowSelection {
+  startMs: number;
+  /** Times of addressed segments kept regardless of the start (over-cap pins). */
+  pinnedReceivedAtMs: number[];
+  /** Context segments dropped before the window start. */
+  omittedCount: number;
+  omittedEstTokens: number;
+  /** The region since the last action alone exceeded the budget. */
+  overCap: boolean;
+}
+
+export const selectProbeWindowStart = (params: {
+  /** Probe segments (RC + synthesized tool calls), ascending by receivedAtMs. */
+  segments: { receivedAtMs: number; tokens: number; mentionsMe?: boolean; repliesToMe?: boolean }[];
+  maxEstTokens: number;
+  lastActedMs: number;
+  previousStartMs: number | null;
+}): ProbeWindowSelection | null => {
+  const { segments, maxEstTokens, lastActedMs, previousStartMs } = params;
+  if (segments.length === 0) return null;
+  const targetEstTokens = Math.max(1, Math.floor(maxEstTokens / PROBE_WINDOW_TARGET_DIVISOR));
+
+  // Direct addresses since the last action are pinned: however old they are,
+  // the over-cap fallback must not drop them. RC already carries the flags.
+  const pinnedTimes = new Set<number>();
+  for (const s of segments)
+    if (s.receivedAtMs > lastActedMs && (s.mentionsMe === true || s.repliesToMe === true))
+      pinnedTimes.add(s.receivedAtMs);
+
+  // Oldest segment that must stay because it arrived after the bot last acted.
+  let mandatoryStartMs: number | null = null;
+  for (const s of segments)
+    if (s.receivedAtMs > lastActedMs && (mandatoryStartMs == null || s.receivedAtMs < mandatoryStartMs))
+      mandatoryStartMs = s.receivedAtMs;
+
+  const tokensFrom = (startMs: number): number => {
+    let total = 0;
+    for (const s of segments) if (s.receivedAtMs >= startMs || pinnedTimes.has(s.receivedAtMs)) total += s.tokens;
+    return total;
+  };
+
+  // Start of the newest suffix fitting `budget`; the newest segment is kept
+  // even when it alone overflows.
+  const walkBackStart = (budget: number): number => {
+    let total = 0;
+    for (let i = segments.length - 1; i >= 0; i--) {
+      total += segments[i]!.tokens;
+      if (total > budget)
+        return i + 1 < segments.length ? segments[i + 1]!.receivedAtMs : segments[i]!.receivedAtMs;
+    }
+    return segments[0]!.receivedAtMs;
+  };
+
+  const targetStartMs = walkBackStart(targetEstTokens);
+  const overCap = mandatoryStartMs != null && tokensFrom(mandatoryStartMs) > maxEstTokens;
+
+  let startMs: number;
+  if (overCap) {
+    // Keep the newest target suffix plus pinned addresses (below). The
+    // fallback start is held with the same hysteresis as the normal path, so
+    // it only jumps once the kept slice exceeds the budget again.
+    startMs = previousStartMs != null && tokensFrom(previousStartMs) <= maxEstTokens
+      ? previousStartMs
+      : targetStartMs;
+  } else if (previousStartMs == null) {
+    startMs = mandatoryStartMs == null ? targetStartMs : Math.min(targetStartMs, mandatoryStartMs);
+  } else {
+    const stableStartMs = mandatoryStartMs == null ? previousStartMs : Math.min(previousStartMs, mandatoryStartMs);
+    startMs = tokensFrom(stableStartMs) > maxEstTokens
+      ? (mandatoryStartMs == null ? targetStartMs : Math.min(targetStartMs, mandatoryStartMs))
+      : stableStartMs;
+  }
+
+  let omittedCount = 0;
+  let omittedEstTokens = 0;
+  for (const s of segments) {
+    if (s.receivedAtMs >= startMs || pinnedTimes.has(s.receivedAtMs)) continue;
+    omittedCount++;
+    omittedEstTokens += s.tokens;
+  }
+  return { startMs, pinnedReceivedAtMs: [...pinnedTimes], omittedCount, omittedEstTokens, overCap };
+};
+
+/** Estimated tokens for plain text at the calibrated blended rate. */
+export const estimateTextTokens = (text: string): number => textTokens(text);
+
+// The compaction summary is chat-global context, not part of the recent slice:
+// it is always included, never counts against `contextEstTokens`/the hysteresis
+// target, and is only bounded by its own cap. It truncates from the end because
+// deep history is what the summary carries; recent history is in the window.
+const DEFAULT_PROBE_SUMMARY_MAX_EST_TOKENS = 20_000;
+
+const truncateSummaryFromEnd = (summary: string, maxEstTokens: number): string => {
+  const maxChars = maxEstTokens * CHARS_PER_TOKEN;
+  return summary.length <= maxChars
+    ? summary
+    : `${summary.slice(0, maxChars)}\n[... summary truncated ...]`;
+};
+
 export const composeProbeContext = (
   rc: RenderedContext,
   trs: TurnResponseV2[],
   maxTokens: number,
   compactSummary?: string,
-): { entries: ConversationEntry[]; estimatedTokens: number; rawEstimatedTokens: number } | null => {
+  window?: { lastActedMs: number; previousStartMs: number | null; summaryMaxEstTokens?: number },
+): {
+  entries: ConversationEntry[];
+  estimatedTokens: number;
+  rawEstimatedTokens: number;
+  windowStartMs: number | null;
+  omittedCount: number;
+  omittedEstTokens: number;
+  overCap: boolean;
+} | null => {
   // Synthesize tool-call XML segments and merge them with RC by timestamp.
   // No real TRs go in — mergeContext receives [] for the trs side, so the
   // probe sees only XML user-message text (no assistant entries, no tool
   // results, no reasoning).
   const synthSegments = synthesizeToolCallSegments(trs);
-  const augmentedRC: RenderedContext = [...rc, ...synthSegments];
+  let augmentedRC: RenderedContext = [...rc, ...synthSegments];
+  let selection: ProbeWindowSelection | null = null;
+  if (window) {
+    selection = selectProbeWindowStart({
+      segments: augmentedRC
+        .map(seg => ({
+          receivedAtMs: seg.receivedAtMs,
+          tokens: renderedContentTokens(seg.content),
+          mentionsMe: seg.mentionsMe,
+          repliesToMe: seg.repliesToMe,
+        }))
+        .sort((a, b) => a.receivedAtMs - b.receivedAtMs),
+      maxEstTokens: maxTokens,
+      lastActedMs: window.lastActedMs,
+      previousStartMs: window.previousStartMs,
+    });
+    if (selection != null) {
+      const startMs = selection.startMs;
+      const pinned = new Set(selection.pinnedReceivedAtMs);
+      augmentedRC = augmentedRC.filter(seg => seg.receivedAtMs >= startMs || pinned.has(seg.receivedAtMs));
+      if (selection.omittedCount > 0) {
+        // Mark the gap inline: probe RC segments all collapse into one user
+        // message in timestamp order, so a segment just before the slice lands
+        // between kept older pinned items and the newer window content.
+        augmentedRC = [
+          ...augmentedRC,
+          {
+            receivedAtMs: startMs - 1,
+            content: [{ type: 'text', text: `<omitted messages="${selection.omittedCount}"/>` }],
+          },
+        ];
+      }
+    }
+  }
   const merged = mergeContext(augmentedRC, []);
   if (merged.length === 0 && !compactSummary) return null;
 
-  const entries: ConversationEntry[] = compactSummary
-    ? [
-        { kind: 'message', role: 'user', parts: [{ kind: 'text', text: `[Conversation summary]\n${compactSummary}` }] } satisfies InputMessage,
-        ...merged,
-      ]
-    : merged;
-
-  const rawEstimatedTokens = entries.reduce((a, e) => a + entryTokens(e), 0);
-  const trimmed = trimEntries(entries, maxTokens);
-  return { ...trimmed, rawEstimatedTokens };
+  const summaryEntry: InputMessage | undefined = compactSummary === undefined
+    ? undefined
+    : {
+        kind: 'message',
+        role: 'user',
+        parts: [{
+          kind: 'text',
+          text: `[Conversation summary]\n${truncateSummaryFromEnd(
+            compactSummary,
+            window?.summaryMaxEstTokens ?? DEFAULT_PROBE_SUMMARY_MAX_EST_TOKENS,
+          )}`,
+        }],
+      };
+  const summaryTokens = summaryEntry === undefined ? 0 : entryTokens(summaryEntry);
+  const rawEstimatedTokens = merged.reduce((a, e) => a + entryTokens(e), 0) + summaryTokens;
+  const trimmed = trimEntries(merged, maxTokens);
+  const entries = summaryEntry === undefined ? trimmed.entries : [summaryEntry, ...trimmed.entries];
+  return {
+    entries,
+    estimatedTokens: trimmed.estimatedTokens + summaryTokens,
+    rawEstimatedTokens,
+    windowStartMs: selection?.startMs ?? null,
+    omittedCount: selection?.omittedCount ?? 0,
+    omittedEstTokens: selection?.omittedEstTokens ?? 0,
+    overCap: selection?.overCap ?? false,
+  };
 };
 
 export const injectLateBindingPrompt = (entries: ConversationEntry[], prompt: string): void => {

@@ -1,9 +1,11 @@
 import sharp from 'sharp';
 
+import { buildMessageAliases, messageAlias } from './aliases';
 import type { RenderParams, RenderedContentPiece, RenderedContext, RenderedContextSegment } from './types';
 import type { CanonicalAttachment, CanonicalUser, ContentNode } from '../adaptation/types';
 import type { ICMessage, ICRuntimeEvent, ICSystemEvent, IntermediateContext } from '../projection/types';
 
+export { assignMessageAliases, createMessageIdResolver, isMessageAlias, messageAlias, resolveMessageAlias, resolveMessageAliasIn } from './aliases';
 export type { RenderParams, RenderedContentPiece, RenderedContext, RenderedContextSegment } from './types';
 
 // --- Helpers ---
@@ -24,38 +26,79 @@ const formatSender = (user: CanonicalUser, contactNames?: Map<string, string>): 
 
 const pad2 = (n: number): string => String(n).padStart(2, '0');
 
-const formatTimestamp = (epochSec: number, utcOffsetMin: number): string => {
+// Deployment-local offset, frozen at process start: every render in this
+// process compares event offsets against it, so a DST change mid-run renders an
+// explicit suffix instead of silently rewriting earlier messages.
+// Frozen at process start so a DST switch mid-run only suffixes new events and
+// never rewrites the cached prefix; a restart across a switch rewrites it once.
+const PROCESS_UTC_OFFSET_MIN = -new Date().getTimezoneOffset();
+
+interface LocalTime {
+  // `MM-DD HH:MM:SS` — the year is deliberately absent. Rendering it when it
+  // differs from the current year would rewrite every message once a year and
+  // break prefix caching; the late-binding prompt's "Current time" carries it.
+  stamp: string;
+  offset: string;
+}
+
+const localTime = (epochSec: number, utcOffsetMin: number): LocalTime => {
   // Shift to local time by adding offset, then read UTC accessors
   const d = new Date((epochSec + utcOffsetMin * 60) * 1000);
-  const date = `${d.getUTCFullYear()}-${pad2(d.getUTCMonth() + 1)}-${pad2(d.getUTCDate())}`;
-  const time = `${pad2(d.getUTCHours())}:${pad2(d.getUTCMinutes())}:${pad2(d.getUTCSeconds())}`;
 
   const sign = utcOffsetMin >= 0 ? '+' : '-';
   const abs = Math.abs(utcOffsetMin);
-  const offset = `${sign}${pad2(Math.floor(abs / 60))}:${pad2(abs % 60)}`;
 
-  return `${date}T${time}${offset}`;
+  return {
+    stamp: `${pad2(d.getUTCMonth() + 1)}-${pad2(d.getUTCDate())} ${pad2(d.getUTCHours())}:${pad2(d.getUTCMinutes())}:${pad2(d.getUTCSeconds())}`,
+    offset: `${sign}${pad2(Math.floor(abs / 60))}:${pad2(abs % 60)}`,
+  };
 };
+
+// Self-contained timestamp: every element carries its own `MM-DD HH:MM:SS`, so
+// filtering (self-sent segments) or cutting (compaction cursor, probe window) a
+// prefix never strips the date from what remains. The ` +HH:MM` suffix appears
+// only when the event's clock differs from the deployment's usual offset.
+const formatStamp = (epochSec: number, utcOffsetMin: number, localUtcOffsetMin: number): string => {
+  const { stamp, offset } = localTime(epochSec, utcOffsetMin);
+  return utcOffsetMin === localUtcOffsetMin ? stamp : `${stamp} ${offset}`;
+};
+
+// --- Rendered timeline state ---
+
+// Per-render state: message aliases and the deployment-local offset used to
+// decide whether a timestamp needs an explicit offset suffix.
+interface RenderState {
+  params: RenderParams;
+  localUtcOffsetMin: number;
+  // Canonical message id -> rendered id (alias, or the canonical id on a hash
+  // collision). Ids absent from the context (e.g. a reply target outside the
+  // window) get a pure alias; canonical id when aliasing is off.
+  displayId: (messageId: string) => string;
+}
 
 // --- ContentNode → XML ---
 
-const renderContentNode = (node: ContentNode): string => {
+const renderContentNode = (node: ContentNode, senderId?: string): string => {
   switch (node.type) {
   case 'text': return escapeXml(node.text);
   case 'code': return `<code>${escapeXml(node.text)}</code>`;
   case 'pre': return node.language
     ? `<pre lang="${escapeXml(node.language)}">${escapeXml(node.text)}</pre>`
     : `<pre>${escapeXml(node.text)}</pre>`;
-  case 'bold': return `<b>${renderContent(node.children)}</b>`;
-  case 'italic': return `<i>${renderContent(node.children)}</i>`;
-  case 'underline': return `<u>${renderContent(node.children)}</u>`;
-  case 'strikethrough': return `<s>${renderContent(node.children)}</s>`;
-  case 'spoiler': return `<spoiler>${renderContent(node.children)}</spoiler>`;
-  case 'blockquote': return `<blockquote>${renderContent(node.children)}</blockquote>`;
-  case 'link': return `<a href="${escapeXml(node.url)}">${renderContent(node.children)}</a>`;
-  case 'mention': return node.userId
-    ? `<mention uid="${escapeXml(node.userId)}">${renderContent(node.children)}</mention>`
-    : `<mention>${renderContent(node.children)}</mention>`;
+  case 'bold': return `<b>${renderContent(node.children, senderId)}</b>`;
+  case 'italic': return `<i>${renderContent(node.children, senderId)}</i>`;
+  case 'underline': return `<u>${renderContent(node.children, senderId)}</u>`;
+  case 'strikethrough': return `<s>${renderContent(node.children, senderId)}</s>`;
+  case 'spoiler': return `<spoiler>${renderContent(node.children, senderId)}</spoiler>`;
+  case 'blockquote': return `<blockquote>${renderContent(node.children, senderId)}</blockquote>`;
+  case 'link': return `<a href="${escapeXml(node.url)}">${renderContent(node.children, senderId)}</a>`;
+  case 'mention':
+    // A mention of the message's own sender loses nothing when uid is omitted:
+    // the message's own `sender` / `uid` attributes already carry it. Only
+    // platforms that render `uid` (Feishu) may elide, so Telegram is unchanged.
+    return node.userId && node.userId !== senderId
+      ? `<mention uid="${escapeXml(node.userId)}">${renderContent(node.children, senderId)}</mention>`
+      : `<mention>${renderContent(node.children, senderId)}</mention>`;
   case 'custom_emoji':
     if (node.altText) {
       const packAttr = node.stickerSetName ? ` pack="${escapeXml(node.stickerSetName)}"` : '';
@@ -63,12 +106,12 @@ const renderContentNode = (node: ContentNode): string => {
     }
     if (node.altTextError)
       return `<custom-emoji error="${escapeXml(node.altTextError)}"/>`;
-    return renderContent(node.children);
+    return renderContent(node.children, senderId);
   }
 };
 
-const renderContent = (nodes: ContentNode[]): string =>
-  nodes.map(renderContentNode).join('');
+const renderContent = (nodes: ContentNode[], senderId?: string): string =>
+  nodes.map(node => renderContentNode(node, senderId)).join('');
 
 const REPLY_PREVIEW_MAX_CHARS = 100;
 
@@ -119,7 +162,8 @@ const hasMention = (nodes: ContentNode[], userId: string): boolean =>
 
 // --- ICNode → content pieces ---
 
-const renderMessage = (msg: ICMessage, params: RenderParams): { content: RenderedContentPiece[]; senderId?: string; isMyself: boolean; isSelfSent: boolean; isBot: boolean; mentionsMe: boolean; repliesToMe: boolean } => {
+const renderMessage = (msg: ICMessage, state: RenderState): { content: RenderedContentPiece[]; senderId?: string; isMyself: boolean; isSelfSent: boolean; isBot: boolean; mentionsMe: boolean; repliesToMe: boolean } => {
+  const { params } = state;
   const isMyself = !!(params.botUserId && msg.sender?.id === params.botUserId);
   const isSelfSent = !!msg.isSelfSent;
   // Another bot in the chat. Self messages are marked `myself="true"` instead,
@@ -135,23 +179,27 @@ const renderMessage = (msg: ICMessage, params: RenderParams): { content: Rendere
   const mentionsMe = !isBlocked && !!(params.botUserId && hasMention(msg.content, params.botUserId));
   const repliesToMe = !isBlocked && !!(params.botUserId && msg.replyToSender?.id === params.botUserId);
   const attrs: string[] = [
-    `id="${escapeXml(msg.messageId)}"`,
+    `id="${escapeXml(state.displayId(msg.messageId))}"`,
   ];
   if (msg.sender) {
-    attrs.push(`sender="${escapeXml(formatSender(msg.sender, params.contactNames))}"`);
-    // Stable platform identity, needed to address Feishu participants by open_id.
-    if (params.senderUid) attrs.push(`uid="${escapeXml(msg.sender.id)}"`);
+    const sender = formatSender(msg.sender, params.contactNames);
+    attrs.push(`sender="${escapeXml(sender)}"`);
+    // Stable platform identity, needed to address Feishu participants by
+    // open_id. Omitted when the rendered sender already is that open_id (the
+    // contact name is unknown), so the id is never repeated in one message.
+    if (params.senderUid && sender !== msg.sender.id)
+      attrs.push(`uid="${escapeXml(msg.sender.id)}"`);
   }
   if (isMyself) attrs.push('myself="true"');
   if (isBot) attrs.push('bot="true"');
   if (isMaintainer) attrs.push('maintainer="true"');
-  attrs.push(`t="${formatTimestamp(msg.timestampSec, msg.utcOffsetMin)}"`);
+  attrs.push(`t="${formatStamp(msg.timestampSec, msg.utcOffsetMin, state.localUtcOffsetMin)}"`);
 
   if (!isMyself && msg.receivedAtMs / 1000 - msg.timestampSec > LATE_DELIVERY_THRESHOLD_SEC)
-    attrs.push(`received="${formatTimestamp(Math.floor(msg.receivedAtMs / 1000), msg.utcOffsetMin)}"`);
+    attrs.push(`received="${formatStamp(Math.floor(msg.receivedAtMs / 1000), msg.utcOffsetMin, state.localUtcOffsetMin)}"`);
 
   if (msg.editedAtSec != null)
-    attrs.push(`edited="${formatTimestamp(msg.editedAtSec, msg.editUtcOffsetMin ?? msg.utcOffsetMin)}"`);
+    attrs.push(`edited="${formatStamp(msg.editedAtSec, msg.editUtcOffsetMin ?? msg.utcOffsetMin, state.localUtcOffsetMin)}"`);
 
   if (msg.forwardInfo) {
     const from = (msg.forwardInfo.sender ? formatSender(msg.forwardInfo.sender, params.contactNames) : undefined)
@@ -179,7 +227,7 @@ const renderMessage = (msg: ICMessage, params: RenderParams): { content: Rendere
   const parts: string[] = [];
 
   if (msg.replyToMessageId) {
-    const replyAttrs = [`id="${escapeXml(msg.replyToMessageId)}"`];
+    const replyAttrs = [`id="${escapeXml(state.displayId(msg.replyToMessageId))}"`];
     if (msg.replyToSender) replyAttrs.push(`sender="${escapeXml(formatSender(msg.replyToSender, params.contactNames))}"`);
     let inner: string;
     if (msg.replyQuoteContent) {
@@ -193,11 +241,14 @@ const renderMessage = (msg: ICMessage, params: RenderParams): { content: Rendere
     parts.push(`<in-reply-to ${replyAttrs.join(' ')}>${inner}</in-reply-to>`);
   }
 
-  const body = renderContent(msg.content);
+  const senderId = msg.sender?.id;
+  // Telegram never renders `uid`, so its mentions must keep theirs. Only
+  // Feishu's `senderUid` mode may elide a self-mention's uid.
+  const body = renderContent(msg.content, state.params.senderUid === true ? senderId : undefined);
   if (body) parts.push(body);
 
   for (let i = 0; i < msg.attachments.length; i++)
-    parts.push(renderAttachment(msg.attachments[i]!, msg.messageId, i));
+    parts.push(renderAttachment(msg.attachments[i]!, state.displayId(msg.messageId), i));
 
   const pieces: RenderedContentPiece[] = [
     { type: 'text', text: `<message ${attrs.join(' ')}>\n${parts.join('\n')}\n</message>` },
@@ -209,24 +260,25 @@ const renderMessage = (msg: ICMessage, params: RenderParams): { content: Rendere
       pieces.push({ type: 'image', image: sharp(Buffer.from(att.thumbnailWebp, 'base64')) });
   }
 
-  return { content: pieces, senderId: msg.sender?.id, isMyself, isSelfSent, isBot, mentionsMe, repliesToMe };
+  return { content: pieces, senderId, isMyself, isSelfSent, isBot, mentionsMe, repliesToMe };
 };
 
-const renderSystemEvent = (event: ICSystemEvent, contactNames?: Map<string, string>): string => {
-  const t = formatTimestamp(event.timestampSec, event.utcOffsetMin);
-  const actorAttr = 'actor' in event && event.actor ? ` actor="${escapeXml(formatSender(event.actor, contactNames))}"` : '';
+const renderSystemEvent = (event: ICSystemEvent, state: RenderState): string => {
+  const { params } = state;
+  const t = formatStamp(event.timestampSec, event.utcOffsetMin, state.localUtcOffsetMin);
+  const actorAttr = 'actor' in event && event.actor ? ` actor="${escapeXml(formatSender(event.actor, params.contactNames))}"` : '';
 
   switch (event.kind) {
   case 'user_renamed':
-    return `<event type="name_change" t="${t}" from_name="${escapeXml(formatSender(event.oldUser, contactNames))}" to_name="${escapeXml(formatSender(event.newUser, contactNames))}"/>`;
+    return `<event type="name_change" t="${t}" from_name="${escapeXml(formatSender(event.oldUser, params.contactNames))}" to_name="${escapeXml(formatSender(event.newUser, params.contactNames))}"/>`;
 
   case 'members_joined': {
-    const members = event.members.map(m => formatSender(m, contactNames)).join(', ');
+    const members = event.members.map(m => formatSender(m, params.contactNames)).join(', ');
     return `<event type="members_joined" t="${t}"${actorAttr} members="${escapeXml(members)}"/>`;
   }
 
   case 'member_left':
-    return `<event type="member_left" t="${t}"${actorAttr} member="${escapeXml(formatSender(event.member, contactNames))}"/>`;
+    return `<event type="member_left" t="${t}"${actorAttr} member="${escapeXml(formatSender(event.member, params.contactNames))}"/>`;
 
   case 'chat_renamed': {
     const fromAttr = event.oldTitle != null ? ` from="${escapeXml(event.oldTitle)}"` : '';
@@ -242,8 +294,8 @@ const renderSystemEvent = (event: ICSystemEvent, contactNames?: Map<string, stri
   case 'message_pinned': {
     const preview = event.preview ? escapeXml(event.preview) : '';
     if (preview)
-      return `<event type="message_pinned" t="${t}"${actorAttr} message_id="${escapeXml(event.messageId)}">${preview}</event>`;
-    return `<event type="message_pinned" t="${t}"${actorAttr} message_id="${escapeXml(event.messageId)}"/>`;
+      return `<event type="message_pinned" t="${t}"${actorAttr} message_id="${escapeXml(state.displayId(event.messageId))}">${preview}</event>`;
+    return `<event type="message_pinned" t="${t}"${actorAttr} message_id="${escapeXml(state.displayId(event.messageId))}"/>`;
   }
 
   default: {
@@ -255,8 +307,8 @@ const renderSystemEvent = (event: ICSystemEvent, contactNames?: Map<string, stri
 
 // --- RuntimeEvent → XML ---
 
-const renderRuntimeEvent = (event: ICRuntimeEvent): string => {
-  const t = formatTimestamp(event.timestampSec, event.utcOffsetMin);
+const renderRuntimeEvent = (event: ICRuntimeEvent, state: RenderState): string => {
+  const t = formatStamp(event.timestampSec, event.utcOffsetMin, state.localUtcOffsetMin);
   const attrs = [
     `type="${event.kind}"`,
     `task-id="${event.taskId}"`,
@@ -279,17 +331,25 @@ const renderRuntimeEvent = (event: ICRuntimeEvent): string => {
 export const render = (ic: IntermediateContext, params: RenderParams = {}): RenderedContext => {
   const segments: RenderedContextSegment[] = [];
 
+  const aliases = params.aliasMessageIds === true ? buildMessageAliases(ic) : null;
+  const state: RenderState = {
+    params,
+    localUtcOffsetMin: params.localUtcOffsetMin ?? PROCESS_UTC_OFFSET_MIN,
+    displayId: messageId =>
+      aliases?.get(messageId) ?? (params.aliasMessageIds === true ? messageAlias(ic.sessionId, messageId) : messageId),
+  };
+
   for (const node of ic.nodes) {
     if (params.compactCursorMs != null && node.receivedAtMs < params.compactCursorMs) continue;
 
     if (node.type === 'message') {
-      const { content, senderId, isMyself, isSelfSent, isBot, mentionsMe, repliesToMe } = renderMessage(node, params);
+      const { content, senderId, isMyself, isSelfSent, isBot, mentionsMe, repliesToMe } = renderMessage(node, state);
       segments.push({ receivedAtMs: node.receivedAtMs, content, ...(senderId && { senderId }), ...(isMyself && { isMyself }), ...(isSelfSent && { isSelfSent }), ...(isBot && { isBot }), ...(mentionsMe && { mentionsMe }), ...(repliesToMe && { repliesToMe }) });
     } else if (node.type === 'runtime_event') {
-      const content = [{ type: 'text' as const, text: renderRuntimeEvent(node) }];
+      const content = [{ type: 'text' as const, text: renderRuntimeEvent(node, state) }];
       segments.push({ receivedAtMs: node.receivedAtMs, content, isRuntimeEvent: true });
     } else {
-      const content = [{ type: 'text' as const, text: renderSystemEvent(node, params.contactNames) }];
+      const content = [{ type: 'text' as const, text: renderSystemEvent(node, state) }];
       segments.push({ receivedAtMs: node.receivedAtMs, content });
     }
   }

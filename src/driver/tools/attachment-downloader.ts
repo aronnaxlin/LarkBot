@@ -4,6 +4,9 @@ export const createAttachmentDownloader = (deps: {
   chatId: string;
   loadMessageAttachments: (chatId: string, messageId: string) => Attachment[] | undefined;
   downloadMessageMedia: (chatId: string, messageId: string, index: number) => Promise<Buffer | undefined>;
+  // Rendered `file-id` values carry a message alias; resolve it to the
+  // canonical id before any platform lookup. Canonical ids pass through.
+  resolveMessageId?: (messageId: string) => string;
 }): (fileId: string) => Promise<Buffer> =>
   async (fileId: string): Promise<Buffer> => {
     const colonIdx = fileId.lastIndexOf(':');
@@ -11,7 +14,8 @@ export const createAttachmentDownloader = (deps: {
 
     // Message IDs are opaque platform strings (e.g. Feishu `om_...`); only the
     // index after the last colon is numeric.
-    const messageId = fileId.slice(0, colonIdx);
+    const rawMessageId = fileId.slice(0, colonIdx);
+    const messageId = rawMessageId === '' ? rawMessageId : (deps.resolveMessageId?.(rawMessageId) ?? rawMessageId);
     const indexText = fileId.slice(colonIdx + 1);
     const attachmentIndex = /^\d+$/.test(indexText) ? Number(indexText) : NaN;
     if (messageId === '' || isNaN(attachmentIndex))

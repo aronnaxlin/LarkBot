@@ -24,7 +24,7 @@ export const createReadImageTool = (deps: {
     properties: {
       file_id: {
         type: 'string',
-        description: 'The `file-id` from an `<attachment>` element. (Typical format: `number:number`)',
+        description: 'The `file-id` from an `<attachment>` element, e.g. `m4f8a2c01:0`.',
       },
       path: {
         type: 'string',

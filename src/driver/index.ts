@@ -33,6 +33,13 @@ export const createDriver = (config: DriverConfig, deps: DriverPlatform & {
   getChatTitle: (chatId: string) => string | undefined;
   runtimeConfig: RuntimeConfig;
   readOldMessages: (chatId: string, messageIds: string[]) => Promise<string> | string;
+  // Resolve a rendered message alias (or a canonical id) to the canonical id
+  // before any platform call or message existence check. Unknown input is
+  // returned unchanged so the normal unknown-id errors still apply.
+  resolveMessageId?: (chatId: string, raw: string) => string;
+  // Render a canonical id the way the chatlog shows it, for tool results that
+  // echo a message id back to the model.
+  formatMessageId?: (chatId: string, messageId: string) => string;
   resolveModel: (name: string) => LlmEndpoint;
   backgroundTask: {
     startTask: (typeName: string, sessionId: string, params: unknown, intention: string | undefined, timeoutMs: number) => number;
@@ -109,6 +116,8 @@ export const createDriver = (config: DriverConfig, deps: DriverPlatform & {
       downloadMessageMedia: deps.downloadMessageMedia,
       supportsOutboundAttachments: deps.supportsOutboundAttachments,
       readOldMessages: deps.readOldMessages,
+      resolveMessageId: id => deps.resolveMessageId?.(chatId, id) ?? id,
+      formatMessageId: id => deps.formatMessageId?.(chatId, id) ?? id,
       resolveModel: deps.resolveModel,
       backgroundTask: deps.backgroundTask,
       log,

@@ -207,6 +207,53 @@ describe('createPrimaryTools', () => {
     expect(logger.log).toHaveBeenCalledWith('send_message tool called');
   });
 
+  it('resolves rendered aliases before platform calls and echoes sent ids as aliases', async () => {
+    const { deps } = createFixture();
+    const canonicalByAlias: Record<string, string> = { m0abc12345: 'om_real' };
+    deps.resolveMessageId = vi.fn((id: string) => canonicalByAlias[id] ?? id);
+    deps.formatMessageId = id => (id === 'om_sent' ? 'm0sent00001' : id);
+    vi.mocked(deps.messageExists).mockImplementation((_chatId, messageId) => messageId === 'om_real');
+    vi.mocked(deps.sendMessage).mockResolvedValue({ messageId: 'om_sent' });
+    vi.mocked(deps.loadMessageAttachments!).mockReturnValue([{ type: 'photo' }, { type: 'photo' }]);
+    vi.mocked(deps.downloadMessageMedia!).mockResolvedValue(Buffer.from('file'));
+    const tools = createPrimaryTools(deps);
+
+    await expect(findTool(tools, 'send_message').execute({ text: 'hi', reply_to: 'm0abc12345' })).resolves.toEqual({
+      content: JSON.stringify({ ok: true, message_id: 'm0sent00001' }),
+      requiresFollowUp: false,
+    });
+    expect(deps.messageExists).toHaveBeenCalledWith('chat-1', 'om_real');
+    expect(deps.sendMessage).toHaveBeenCalledWith('chat-1', 'hi', 'om_real', undefined);
+
+    await findTool(tools, 'react').execute({ message_id: 'm0abc12345', emoji: '\u{1F44D}' });
+    expect(deps.setMessageReaction).toHaveBeenCalledWith('chat-1', 'om_real', '\u{1F44D}');
+
+    await findTool(tools, 'download_file').execute({ file_id: 'm0abc12345:1', path: 'downloaded.bin' });
+    expect(deps.loadMessageAttachments).toHaveBeenCalledWith('chat-1', 'om_real');
+    expect(deps.downloadMessageMedia).toHaveBeenCalledWith('chat-1', 'om_real', 1);
+
+    await findTool(tools, 'read_old_messages').execute({ message_ids: ['m0abc12345', 'om_plain'] });
+    expect(deps.readOldMessages).toHaveBeenCalledWith('chat-1', ['om_real', 'om_plain']);
+
+    // send_message + react resolved the same alias multiple times across the
+    // tool set; each distinct id must hit the resolver at most once.
+    expect(deps.resolveMessageId).toHaveBeenCalledTimes(2);
+  });
+
+  it('leaves unknown aliases unresolved so the platform check rejects them', async () => {
+    const { deps } = createFixture();
+    deps.resolveMessageId = id => id;
+    vi.mocked(deps.messageExists).mockImplementation((_chatId, messageId) => messageId === '42');
+    const tools = createPrimaryTools(deps);
+
+    await expect(findTool(tools, 'send_message').execute({ text: 'hi', reply_to: 'm0missing01' }))
+      .resolves.toMatchObject({ requiresFollowUp: true });
+    expect(deps.sendMessage).not.toHaveBeenCalled();
+    await expect(findTool(tools, 'react').execute({ message_id: 'm0missing01', emoji: '\u{1F44D}' }))
+      .resolves.toMatchObject({ requiresFollowUp: true });
+    expect(deps.setMessageReaction).not.toHaveBeenCalled();
+  });
+
   it('wires background task start, kill, and output reads to the current chat', async () => {
     const { deps } = createFixture();
     const tools = createPrimaryTools(deps);

@@ -10,6 +10,7 @@ import {
   loadLastProbeTime,
   loadLatestMessageContent,
   loadMessageAttachments,
+  loadMessageIds,
   loadTurnResponses,
   messageExists,
   persistCompaction,
@@ -26,6 +27,7 @@ import { createDriver } from '../../driver';
 import { createDriverInputBus } from '../../driver/input-bus';
 import { renderOldMessagesXml } from '../../driver/read-old-messages';
 import { createEventSink } from '../../event-sink';
+import { createMessageIdResolver, messageAlias } from '../../rendering';
 import {
   createTelegramDriverHooks,
   createTelegramDriverPlatform,
@@ -143,6 +145,21 @@ export const registerDriver = ({ get, register }: Registrar): void => {
       runtimeConfig: get(TOKENS.RUNTIME_CONFIG),
       readOldMessages: (chatId, messageIds) =>
         renderOldMessagesXml(chatId, loadEventsByMessageIds(db, chatId, messageIds), pipeline.getRenderParams(chatId)),
+      // Tool inputs may carry a rendered alias instead of the canonical id.
+      // Aliases resolve through the live context first; a miss falls back to a
+      // narrow message-id scan of persisted history, so reading or reacting to
+      // a message the context no longer holds keeps working. Non-aliases and
+      // platforms without aliasing (Telegram) never scan anything.
+      resolveMessageId: createMessageIdResolver({
+        aliasingEnabled: chatId => pipeline.getRenderParams(chatId).aliasMessageIds === true,
+        context: chatId => pipeline.getIC(chatId),
+        persistedMessageIds: chatId => loadMessageIds(db, chatId),
+      }),
+      // Tool results echo the id the chatlog shows, so the model stays consistent.
+      formatMessageId: (chatId, messageId) =>
+        pipeline.getRenderParams(chatId).aliasMessageIds === true
+          ? messageAlias(chatId, messageId)
+          : messageId,
       resolveModel: name => resolveModel(config, name),
       backgroundTask: {
         startTask: (typeName, sessionId, params, intention, timeoutMs) =>

@@ -8,6 +8,7 @@ import { buildPostContent } from './post-content';
 import { createFeishuReactions } from './reactions';
 import type { CanonicalMessageEvent } from '../adaptation/types';
 import type { DriverPlatform } from '../driver/platform';
+import type { Attachment } from '../telegram/message/types';
 
 const DEFAULT_RETRY_DELAYS_MS = [1000, 3000];
 
@@ -21,6 +22,11 @@ export const createFeishuDriverPlatform = (deps: {
   // Whether an open_id belongs to a participant seen in this chat; outgoing
   // mentions of anyone else are rejected before the send.
   isKnownParticipant: (chatId: string, openId: string) => boolean;
+  // Inbound media capability, provided together by the host: a synchronous
+  // read of the persisted canonical attachments plus the SDK byte transport.
+  // Both absent means Feishu exposes no read_image(file_id)/download_file.
+  loadMessageAttachments?: (chatId: string, messageId: string) => Attachment[] | undefined;
+  getMessageResource?: FeishuApi['getMessageResource'];
   logger: Logger;
   retryDelaysMs?: readonly number[];
   newUuid?: () => string;
@@ -31,6 +37,23 @@ export const createFeishuDriverPlatform = (deps: {
   const newUuid = deps.newUuid ?? randomUUID;
   const now = deps.now ?? Date.now;
   const reactions = createFeishuReactions(deps.api);
+
+  const { loadMessageAttachments, getMessageResource } = deps;
+  if ((loadMessageAttachments == null) !== (getMessageResource == null))
+    throw new Error('Feishu attachment capability requires both loadMessageAttachments and getMessageResource');
+  const media: Pick<DriverPlatform, 'loadMessageAttachments' | 'downloadMessageMedia'> =
+    loadMessageAttachments && getMessageResource
+      ? {
+          loadMessageAttachments,
+          downloadMessageMedia: async (chatId, messageId, index) => {
+            const attachment = loadMessageAttachments(chatId, messageId)?.[index];
+            if (!attachment) return undefined;
+            if (!attachment.fileKey)
+              throw new Error(`Feishu attachment ${messageId}:${index} is missing its fileKey`);
+            return await getMessageResource({ messageId, fileKey: attachment.fileKey, type: 'image' });
+          },
+        }
+      : {};
 
   // One uuid per logical message: every retry of the same send reuses it, so
   // Feishu deduplicates a retry whose earlier attempt actually succeeded.
@@ -88,5 +111,6 @@ export const createFeishuDriverPlatform = (deps: {
     sendTypingAction: async () => {},
     onDebounceStateChange: () => {},
     messageExists: deps.messageExists,
+    ...media,
   };
 };

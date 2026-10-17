@@ -36,6 +36,10 @@ export interface Attachment {
   mimeType?: string;
   fileSize?: number;
 
+  // Feishu `image_key`: the stable resource key used to download the original
+  // bytes. Telegram re-downloads by (chatId, messageId) and leaves this unset.
+  fileKey?: string;
+
   // Dimensions
   width?: number;
   height?: number;

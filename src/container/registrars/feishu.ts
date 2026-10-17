@@ -1,4 +1,4 @@
-import { canonicalMessageExists, hasEventDedupKey, persistDedupedEvent } from '../../db';
+import { canonicalMessageExists, hasEventDedupKey, loadEventsByMessageIds, persistDedupedEvent } from '../../db';
 import {
   createFeishuBotIdentity,
   createFeishuDriverPlatform,
@@ -47,12 +47,20 @@ export const registerFeishu = ({ get, register }: Registrar): void => {
 
   register(TOKENS.FEISHU_DRIVER_PLATFORM, () => {
     const db = get(TOKENS.DB);
+    const sdk = get(TOKENS.FEISHU_SDK);
     return createFeishuDriverPlatform({
-      api: get(TOKENS.FEISHU_SDK).api,
+      api: sdk.api,
       botInfo: get(TOKENS.FEISHU_BOT_IDENTITY).info,
       acceptSelfSent: get(TOKENS.FEISHU_INGRESS).acceptSelfSent,
       messageExists: (chatId, messageId) => canonicalMessageExists(db, chatId, messageId),
       isKnownParticipant: (chatId, openId) => get(TOKENS.FEISHU_USER_NAMES).isKnown(chatId, openId),
+      // read_image(file_id)/download_file: the stable image_key was persisted
+      // on the canonical attachment when the message was archived.
+      loadMessageAttachments: (chatId, messageId) => {
+        const event = loadEventsByMessageIds(db, chatId, [messageId]).find(candidate => candidate.type === 'message');
+        return event?.type === 'message' ? event.attachments : undefined;
+      },
+      getMessageResource: sdk.api.getMessageResource,
       logger: get(TOKENS.LOGGER),
     });
   });

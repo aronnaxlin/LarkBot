@@ -3,7 +3,7 @@ import type { Attachment } from '../../telegram/message/types';
 export const createAttachmentDownloader = (deps: {
   chatId: string;
   loadMessageAttachments: (chatId: string, messageId: string) => Attachment[] | undefined;
-  downloadMessageMedia: (chatId: string, messageId: string) => Promise<Buffer | undefined>;
+  downloadMessageMedia: (chatId: string, messageId: string, index: number) => Promise<Buffer | undefined>;
 }): (fileId: string) => Promise<Buffer> =>
   async (fileId: string): Promise<Buffer> => {
     const colonIdx = fileId.lastIndexOf(':');
@@ -20,12 +20,12 @@ export const createAttachmentDownloader = (deps: {
     const attachments = deps.loadMessageAttachments(deps.chatId, messageId);
     if (!attachments || attachments.length === 0)
       throw new Error(`No attachments found for message ${messageId}.`);
-    if (attachments.length !== 1 || attachmentIndex !== 0)
-      throw new Error('Telegram messages must expose exactly one downloadable attachment at index 0');
+    if (attachmentIndex < 0 || attachmentIndex >= attachments.length)
+      throw new Error(`Attachment index ${attachmentIndex} is out of range for message ${messageId} (${attachments.length} attachment(s)).`);
 
-    const buffer = await deps.downloadMessageMedia(deps.chatId, messageId);
+    const buffer = await deps.downloadMessageMedia(deps.chatId, messageId, attachmentIndex);
     if (!buffer)
-      throw new Error('Failed to download file from Telegram.');
+      throw new Error(`Failed to download attachment ${fileId}.`);
 
     return buffer;
   };

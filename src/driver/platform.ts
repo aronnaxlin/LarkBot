@@ -23,9 +23,13 @@ export interface DriverPlatform {
   onDebounceStateChange: (chatId: string, isDebouncing: boolean) => void;
   // Gate for LLM-supplied message IDs before any platform API call.
   messageExists: (chatId: string, messageId: string) => boolean;
-  // Media attachments in both directions: `download_file`, `read_image(file_id)`,
-  // and `send_message.attachments`. Provided together or not at all.
+  // Inbound media: `download_file` and `read_image(file_id)`. Provided
+  // together or not at all.
   loadMessageAttachments?: (chatId: string, messageId: string) => Attachment[] | undefined;
-  downloadMessageMedia?: (chatId: string, messageId: string) => Promise<Buffer | undefined>;
+  downloadMessageMedia?: (chatId: string, messageId: string, index: number) => Promise<Buffer | undefined>;
+  // Outbound media: exposes the `attachments` parameter on `send_message`.
+  // Declared separately because a platform can support inbound downloads while
+  // still being unable to send attachments (Feishu today).
+  supportsOutboundAttachments?: boolean;
   banSpammer?: (chatId: string, messageId: string) => Promise<BanSpammerResult>;
 }

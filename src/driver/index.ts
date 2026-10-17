@@ -107,6 +107,7 @@ export const createDriver = (config: DriverConfig, deps: DriverPlatform & {
       loadMessageAttachments: deps.loadMessageAttachments,
       messageExists: deps.messageExists,
       downloadMessageMedia: deps.downloadMessageMedia,
+      supportsOutboundAttachments: deps.supportsOutboundAttachments,
       readOldMessages: deps.readOldMessages,
       resolveModel: deps.resolveModel,
       backgroundTask: deps.backgroundTask,

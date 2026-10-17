@@ -1,3 +1,5 @@
+import type { Readable } from 'node:stream';
+
 // The Feishu open-platform calls LarkBot makes, as a narrow interface so that
 // adaptation, ingress, and outbound logic stay testable without the SDK.
 // `sdk.ts` is the only implementation.
@@ -15,7 +17,58 @@ export interface FeishuApi {
   }): Promise<{ messageId: string; createTimeMs: number }>;
   createReaction(messageId: string, emojiType: string): Promise<{ reactionId: string }>;
   deleteReaction(messageId: string, reactionId: string): Promise<void>;
+  // Downloads one resource embedded in a message (image/file) as raw bytes.
+  // The caller supplies the resource key parsed from the persisted message.
+  getMessageResource(params: {
+    messageId: string;
+    fileKey: string;
+    type: 'image' | 'file';
+  }): Promise<Buffer>;
 }
+
+// Feishu allows message resources up to 100 MB; LarkBot's shared media budget
+// is 20 MB, so an oversized response is rejected instead of buffered.
+export const MAX_MESSAGE_RESOURCE_BYTES = 20 * 1024 * 1024;
+
+// A stalled transfer must not hold a tool call open indefinitely.
+export const MESSAGE_RESOURCE_TIMEOUT_MS = 30_000;
+
+// Locally raised resource-read failures (size cap, timeout). They carry no
+// server or request data, so they are safe to show to the model verbatim.
+export class MessageResourceReadError extends Error {}
+
+const tooLargeError = (): MessageResourceReadError =>
+  new MessageResourceReadError(`Feishu message resource exceeds the ${MAX_MESSAGE_RESOURCE_BYTES}-byte download limit`);
+
+/** Reject an advertised oversized body before consuming the stream. */
+export const assertMessageResourceSize = (contentLength: unknown): void => {
+  const length = typeof contentLength === 'string' ? Number(contentLength) : contentLength;
+  if (typeof length === 'number' && Number.isFinite(length) && length > MAX_MESSAGE_RESOURCE_BYTES) throw tooLargeError();
+};
+
+export const readMessageResourceStream = async (
+  stream: Readable,
+  timeoutMs = MESSAGE_RESOURCE_TIMEOUT_MS,
+): Promise<Buffer> => {
+  const chunks: Buffer[] = [];
+  let total = 0;
+  const timer = setTimeout(() => {
+    stream.destroy(new MessageResourceReadError(`Feishu message resource download timed out after ${timeoutMs} ms`));
+  }, timeoutMs);
+  try {
+    for await (const chunk of stream) {
+      const buffer = Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk as Uint8Array);
+      total += buffer.length;
+      if (total > MAX_MESSAGE_RESOURCE_BYTES) throw tooLargeError();
+      chunks.push(buffer);
+    }
+  } finally {
+    // Abort the socket on early exit (over cap, timeout, consumer error).
+    clearTimeout(timer);
+    stream.destroy();
+  }
+  return Buffer.concat(chunks);
+};
 
 // Error surface for all Feishu API failures. It carries only the operation,
 // numeric server code and HTTP status only. Free-form server messages and

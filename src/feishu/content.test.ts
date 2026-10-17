@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest';
 
-import { parseFeishuContent } from './content';
+import { parseFeishuAttachments, parseFeishuContent } from './content';
 import type { FeishuMention } from './events';
 
 const alice: FeishuMention = { key: '@_user_1', id: { open_id: 'ou_alice' }, name: 'Alice' };
@@ -56,7 +56,23 @@ describe('parseFeishuContent', () => {
       { type: 'mention', userId: 'ou_bot', children: [{ type: 'text', text: '@LarkBot' }] },
       { type: 'text', text: '\n' },
       { type: 'pre', text: 'func main() {}', language: 'go' },
-      { type: 'text', text: '\n[image]' },
+    ]);
+    expect(parseFeishuAttachments('post', JSON.stringify(post))).toEqual([
+      { type: 'photo', fileKey: 'img_synthetic' },
+    ]);
+  });
+
+  it('collects post images in order and ignores non-image keys', () => {
+    const post = {
+      content: [
+        [{ tag: 'media', image_key: 'img_cover' }, { tag: 'img', image_key: 'img_a' }],
+        [{ tag: 'img', image_key: '' }, { tag: 'img', image_key: 'img_b' }],
+        [{ tag: 'img' }],
+      ],
+    };
+    expect(parseFeishuAttachments('post', JSON.stringify(post))).toEqual([
+      { type: 'photo', fileKey: 'img_a' },
+      { type: 'photo', fileKey: 'img_b' },
     ]);
   });
 
@@ -65,8 +81,14 @@ describe('parseFeishuContent', () => {
       .toEqual([{ type: 'text', text: 'hi' }]);
   });
 
-  it('keeps unsupported message types visible as placeholders', () => {
-    expect(parseFeishuContent('image', '{"image_key":"img_synthetic"}')).toEqual([{ type: 'text', text: '[image]' }]);
+  it('turns image messages into attachments and keeps malformed ones visible', () => {
+    expect(parseFeishuContent('image', '{"image_key":"img_synthetic"}')).toEqual([]);
+    expect(parseFeishuAttachments('image', '{"image_key":"img_synthetic"}')).toEqual([
+      { type: 'photo', fileKey: 'img_synthetic' },
+    ]);
+    expect(parseFeishuContent('image', '{}')).toEqual([{ type: 'text', text: '[image]' }]);
+    expect(parseFeishuAttachments('image', 'not json')).toEqual([]);
     expect(parseFeishuContent('vote', '{}')).toEqual([{ type: 'text', text: '[unsupported message type: vote]' }]);
+    expect(parseFeishuAttachments('vote', '{}')).toEqual([]);
   });
 });

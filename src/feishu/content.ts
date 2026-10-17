@@ -19,9 +19,16 @@ interface PostElement {
   style?: unknown;
   language?: unknown;
   emoji_type?: unknown;
+  image_key?: unknown;
 }
 
 const asString = (value: unknown): string | undefined => typeof value === 'string' ? value : undefined;
+
+// Feishu's stable resource reference for an image inside a message.
+const imageKey = (value: unknown): string | undefined => {
+  const key = asString(value);
+  return key === undefined || key === '' ? undefined : key;
+};
 
 // Feishu sends empty strings for absent names; treat them as missing.
 const nonEmpty = (value: string | undefined): string | undefined => value === '' ? undefined : value;
@@ -119,7 +126,9 @@ const postElementNodes = (element: PostElement, mentions: readonly FeishuMention
   case 'emotion':
     return [{ type: 'text', text: `[${asString(element.emoji_type) ?? 'emoji'}]` }];
   case 'img':
-    return [{ type: 'text', text: '[image]' }];
+    // A key-bearing image renders as an attachment; keep a placeholder only
+    // when the payload is unusable so the message never looks empty.
+    return imageKey(element.image_key) ? [] : [{ type: 'text', text: '[image]' }];
   case 'media':
     return [{ type: 'text', text: '[video]' }];
   default:
@@ -138,31 +147,71 @@ const unwrapPost = (parsed: unknown): { title?: unknown; content?: unknown } | u
   return undefined;
 };
 
+const forEachPostParagraph = (parsed: unknown, visit: (paragraph: unknown[]) => void): void => {
+  const body = unwrapPost(parsed);
+  const paragraphs = body && Array.isArray(body.content) ? body.content : [];
+  for (const paragraph of paragraphs) {
+    if (Array.isArray(paragraph)) visit(paragraph);
+  }
+};
+
 const parsePost = (parsed: unknown, mentions: readonly FeishuMention[]): ContentNode[] => {
   const body = unwrapPost(parsed);
   if (!body) return [{ type: 'text', text: '[rich text]' }];
   const nodes: ContentNode[] = [];
   const title = asString(body.title);
   if (title) nodes.push({ type: 'bold', children: [{ type: 'text', text: title }] });
-  const paragraphs = Array.isArray(body.content) ? body.content : [];
-  for (const paragraph of paragraphs) {
-    if (!Array.isArray(paragraph)) continue;
-    if (nodes.length > 0) pushText(nodes, '\n');
+  forEachPostParagraph(parsed, paragraph => {
+    const paragraphNodes: ContentNode[] = [];
     for (const element of paragraph) {
       if (element == null || typeof element !== 'object') continue;
       for (const node of postElementNodes(element as PostElement, mentions)) {
-        if (node.type === 'text') pushText(nodes, node.text);
-        else nodes.push(node);
+        if (node.type === 'text') pushText(paragraphNodes, node.text);
+        else paragraphNodes.push(node);
       }
     }
-  }
+    // An image-only paragraph adds no text, so it must not leave a separator behind.
+    if (paragraphNodes.length === 0) return;
+    if (nodes.length > 0) pushText(nodes, '\n');
+    for (const node of paragraphNodes) {
+      if (node.type === 'text') pushText(nodes, node.text);
+      else nodes.push(node);
+    }
+  });
   return nodes;
 };
 
-// Media and other rich types are out of scope for the first Feishu version;
-// they render as an explicit placeholder rather than disappearing.
+/** A photo extracted from a Feishu message, ready to persist as a canonical attachment. */
+export interface FeishuImageAttachment {
+  type: 'photo';
+  fileKey: string;
+}
+
+/** Image resources embedded in a message, in payload order. */
+export const parseFeishuAttachments = (messageType: string, rawContent: string): FeishuImageAttachment[] => {
+  const parsed = parseJson(rawContent);
+  if (messageType === 'image') {
+    const key = imageKey((parsed as { image_key?: unknown } | undefined)?.image_key);
+    return key ? [{ type: 'photo', fileKey: key }] : [];
+  }
+  if (messageType !== 'post') return [];
+  const attachments: FeishuImageAttachment[] = [];
+  forEachPostParagraph(parsed, paragraph => {
+    for (const element of paragraph) {
+      if (element == null || typeof element !== 'object') continue;
+      const record = element as PostElement;
+      // `media` elements also carry an `image_key` (the video cover); only `img` is a photo.
+      if (record.tag !== 'img') continue;
+      const key = imageKey(record.image_key);
+      if (key) attachments.push({ type: 'photo', fileKey: key });
+    }
+  });
+  return attachments;
+};
+
+// Rich types other than text, post, and image are out of scope for the first
+// Feishu version; they render as an explicit placeholder rather than disappearing.
 const PLACEHOLDERS: Record<string, string> = {
-  image: '[image]',
   file: '[file]',
   audio: '[audio]',
   media: '[video]',
@@ -181,6 +230,10 @@ export const parseFeishuContent = (
   if (messageType === 'text') {
     const parsed = parseJson(rawContent) as { text?: unknown } | undefined;
     return parseTextWithMentions(asString(parsed?.text) ?? '', mentions);
+  }
+  if (messageType === 'image') {
+    const parsed = parseJson(rawContent) as { image_key?: unknown } | undefined;
+    return imageKey(parsed?.image_key) ? [] : [{ type: 'text', text: '[image]' }];
   }
   if (messageType === 'post') return parsePost(parseJson(rawContent), mentions);
   return [{ type: 'text', text: PLACEHOLDERS[messageType] ?? `[unsupported message type: ${messageType}]` }];

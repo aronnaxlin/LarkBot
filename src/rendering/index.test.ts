@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest';
 
-import { rcToXml, render } from './index';
+import { messageAlias, rcToXml, render } from './index';
 import type { CanonicalUser, ContentNode } from '../adaptation/types';
 import type { ICMessage, ICSystemEvent, IntermediateContext } from '../projection/types';
 
@@ -34,10 +34,10 @@ const xml = (segments: ReturnType<typeof render>): string => rcToXml(segments);
 describe('render', () => {
   describe('basic message', () => {
     it('renders a simple message with sender and timestamp', () => {
-      const result = xml(render(ic([message()])));
+      const result = xml(render(ic([message()]), { localUtcOffsetMin: 480 }));
       expect(result).toContain('id="42"');
       expect(result).toContain('sender="Alice (@alice)"');
-      expect(result).toContain('t="2025-03-12T14:30:00+08:00"');
+      expect(result).toContain('t="03-12 14:30:00"');
       expect(result).toContain('hello');
       expect(result).toContain('<message');
       expect(result).toContain('</message>');
@@ -48,6 +48,45 @@ describe('render', () => {
       expect(xml(render(ic([message()])))).not.toContain('uid=');
       const withUid = xml(render(ic([message()]), { senderUid: true }));
       expect(withUid).toContain('sender="Alice (@alice)" uid="1"');
+    });
+
+    it('omits the sender uid when the rendered sender is already that id', () => {
+      // Feishu contact lookup failure: displayName falls back to the open_id,
+      // so `sender` carries the stable identity and `uid` would repeat it.
+      const fallback: CanonicalUser = { id: 'ou_abc', displayName: '', isBot: false };
+      const result = xml(render(ic([message({ sender: fallback })]), { senderUid: true }));
+      expect(result).toContain('sender="ou_abc"');
+      expect(result).not.toContain('uid=');
+    });
+
+    it('keeps the sender uid when `sender` is a display name', () => {
+      const result = xml(render(ic([message()]), { senderUid: true }));
+      expect(result).toContain('sender="Alice (@alice)" uid="1"');
+    });
+
+    it('deduplicates the uid without disturbing maintainer, bot, or blocked flags', () => {
+      const fallback: CanonicalUser = { id: 'ou_abc', displayName: '', isBot: false };
+      const maintainer = xml(render(ic([message({ sender: fallback })]), {
+        senderUid: true,
+        maintainers: new Set(['ou_abc']),
+      }));
+      expect(maintainer).toContain('sender="ou_abc"');
+      expect(maintainer).toContain('maintainer="true"');
+      expect(maintainer).not.toContain('uid=');
+
+      const otherBot: CanonicalUser = { id: 'ou_bot', displayName: '', isBot: true };
+      const bot = xml(render(ic([message({ messageId: 'b1', sender: otherBot })]), { senderUid: true }));
+      expect(bot).toContain('sender="ou_bot"');
+      expect(bot).toContain('bot="true"');
+      expect(bot).not.toContain('uid=');
+
+      const blocked = xml(render(ic([message({ sender: fallback })]), {
+        senderUid: true,
+        blockedUserIds: new Set(['ou_abc']),
+      }));
+      expect(blocked).toContain('sender="ou_abc"');
+      expect(blocked).toContain('blocked="true"');
+      expect(blocked).not.toContain('uid=');
     });
 
     it('formats sender without username', () => {
@@ -94,26 +133,63 @@ describe('render', () => {
   });
 
   describe('timestamp formatting', () => {
-    it('formats positive UTC offset', () => {
-      const result = xml(render(ic([message({ utcOffsetMin: 480 })])));
-      expect(result).toContain('+08:00');
+    it('renders the deployment offset without a suffix when the event matches it', () => {
+      const result = xml(render(ic([message({ utcOffsetMin: 480 })]), { localUtcOffsetMin: 480 }));
+      expect(result).toContain('t="03-12 14:30:00"');
+      expect(result).not.toContain('+08:00');
     });
 
-    it('formats negative UTC offset', () => {
-      // 1741776600 at -05:00 → 2025-03-12T01:30:00-05:00
-      const result = xml(render(ic([message({ utcOffsetMin: -300 })])));
-      expect(result).toContain('-05:00');
-      expect(result).toContain('T01:30:00');
+    it('appends the offset when the event clock differs from the deployment offset', () => {
+      const result = xml(render(ic([message({ utcOffsetMin: 480 })]), { localUtcOffsetMin: 0 }));
+      expect(result).toContain('t="03-12 14:30:00 +08:00"');
     });
 
-    it('formats zero UTC offset', () => {
-      const result = xml(render(ic([message({ utcOffsetMin: 0 })])));
-      expect(result).toContain('+00:00');
+    it('formats negative offsets', () => {
+      // 1741761000 at -05:00 → 2025-03-12 01:30:00 local
+      const result = xml(render(ic([message({ utcOffsetMin: -300 })]), { localUtcOffsetMin: -300 }));
+      expect(result).toContain('t="03-12 01:30:00"');
     });
 
-    it('formats offset with non-zero minutes', () => {
-      const result = xml(render(ic([message({ utcOffsetMin: 345 })])));
-      expect(result).toContain('+05:45');
+    it('formats offsets with non-zero minutes', () => {
+      const result = xml(render(ic([message({ utcOffsetMin: 345 })]), { localUtcOffsetMin: 0 }));
+      expect(result).toContain('t="03-12 12:15:00 +05:45"');
+    });
+
+    it('keeps every stamp self-contained so a window cut cannot strip its date', () => {
+      // Two messages a day apart; dropping the first (compaction, self-sent
+      // filtering, probe window) must leave the second's date intact.
+      const rc = render(ic([
+        message({ messageId: 'dropped', receivedAtMs: 1000, timestampSec: 1741761000 }),
+        message({ messageId: 'kept', receivedAtMs: 2000, timestampSec: 1741761000 + 86400 }),
+      ]), { localUtcOffsetMin: 480 });
+      const keptText = xml(rc.slice(1));
+      expect(keptText).toContain('t="03-13 14:30:00"');
+      expect(keptText).not.toContain('dropped');
+      const cut = xml(render(ic([
+        message({ messageId: 'dropped', receivedAtMs: 1000, timestampSec: 1741761000 }),
+        message({ messageId: 'kept', receivedAtMs: 2000, timestampSec: 1741761000 + 86400 }),
+      ]), { localUtcOffsetMin: 480, compactCursorMs: 1500 }));
+      expect(cut).toContain('t="03-13 14:30:00"');
+      expect(cut).not.toContain('dropped');
+    });
+
+    it('renders a self-sent message and a later message as independent stamps', () => {
+      const rc = render(ic([
+        message({ messageId: 'mine', isSelfSent: true, receivedAtMs: 1000, timestampSec: 1741761000 }),
+        message({ messageId: 'theirs', receivedAtMs: 2000, timestampSec: 1741761000 + 86400 }),
+      ]), { localUtcOffsetMin: 480 });
+      const withoutSelfSent = xml(rc.filter(segment => !segment.isSelfSent));
+      expect(withoutSelfSent).toContain('t="03-13 14:30:00"');
+    });
+
+    it('renders a late-arriving older message with its own complete date', () => {
+      const rc = render(ic([
+        message({ messageId: 'new', receivedAtMs: 1000, timestampSec: 1741761000 + 86400 }),
+        message({ messageId: 'late', receivedAtMs: 2000, timestampSec: 1741761000 }),
+      ]), { localUtcOffsetMin: 480 });
+      const text = xml(rc);
+      expect(text).toContain('t="03-13 14:30:00"');
+      expect(text).toContain('t="03-12 14:30:00"');
     });
   });
 
@@ -155,9 +231,10 @@ describe('render', () => {
     });
 
     it('renders byte-identically when the set is empty', () => {
-      const expected = '<message id="42" sender="Alice (@alice)" t="2025-03-12T14:30:00+08:00">\nhello\n</message>';
-      expect(xml(render(ic([message()])))).toBe(expected);
-      expect(xml(render(ic([message()]), { maintainers: new Set() }))).toBe(expected);
+      const expected = '<message id="42" sender="Alice (@alice)" t="03-12 14:30:00">\nhello\n</message>';
+      const params = { localUtcOffsetMin: 480 };
+      expect(xml(render(ic([message()]), params))).toBe(expected);
+      expect(xml(render(ic([message()]), { ...params, maintainers: new Set() }))).toBe(expected);
     });
   });
 
@@ -170,8 +247,8 @@ describe('render', () => {
     });
 
     it('adds the local received time above the threshold', () => {
-      const result = xml(render(ic([at(121)])));
-      expect(result).toContain('received="2025-03-12T14:32:01+08:00"');
+      const result = xml(render(ic([at(121)]), { localUtcOffsetMin: 480 }));
+      expect(result).toContain('received="03-12 14:32:01"');
     });
 
     it('does not add the attribute at or below the threshold', () => {
@@ -183,9 +260,19 @@ describe('render', () => {
       expect(xml(render(ic([at(-121)])))).not.toContain('received=');
     });
 
-    it('formats the received time with the event UTC offset', () => {
-      const result = xml(render(ic([at(121, -300)])));
-      expect(result).toContain('received="2025-03-12T01:32:01-05:00"');
+    it('renders the received time with an explicit offset when it differs from the deployment one', () => {
+      const result = xml(render(ic([at(121, -300)]), { localUtcOffsetMin: 480 }));
+      expect(result).toContain('received="03-12 01:32:01 -05:00"');
+    });
+
+    it('keeps the received date when the delivery crosses into another day', () => {
+      // 24h late: same clock time, next local date.
+      const result = xml(render(ic([message({
+        receivedAtMs: (1741761000 + 86400) * 1000,
+        timestampSec: 1741761000,
+      })]), { localUtcOffsetMin: 480 }));
+      expect(result).toContain('t="03-12 14:30:00"');
+      expect(result).toContain('received="03-13 14:30:00"');
     });
 
     it('does not add the attribute to the bot\'s own messages', () => {
@@ -195,21 +282,21 @@ describe('render', () => {
     });
 
     it('keeps received on the deleted self-closing variant', () => {
-      const result = xml(render(ic([at(121, 480, { deleted: true })])));
+      const result = xml(render(ic([at(121, 480, { deleted: true })]), { localUtcOffsetMin: 480 }));
       expect(result).toContain('deleted="true"');
-      expect(result).toContain('received="2025-03-12T14:32:01+08:00"');
+      expect(result).toContain('received="03-12 14:32:01"');
     });
 
     it('keeps received on the blocked self-closing variant', () => {
-      const result = xml(render(ic([at(121)]), { blockedUserIds: new Set(['1']) }));
+      const result = xml(render(ic([at(121)]), { localUtcOffsetMin: 480, blockedUserIds: new Set(['1']) }));
       expect(result).toContain('blocked="true"');
-      expect(result).toContain('received="2025-03-12T14:32:01+08:00"');
+      expect(result).toContain('received="03-12 14:32:01"');
     });
 
     it('keeps the original received time when a late message is edited later', () => {
-      const result = xml(render(ic([at(121, 480, { editedAtSec: 1741761000 + 121 + 3600 })])));
-      expect(result).toContain('received="2025-03-12T14:32:01+08:00"');
-      expect(result).toContain('edited="2025-03-12T15:32:01+08:00"');
+      const result = xml(render(ic([at(121, 480, { editedAtSec: 1741761000 + 121 + 3600 })]), { localUtcOffsetMin: 480 }));
+      expect(result).toContain('received="03-12 14:32:01"');
+      expect(result).toContain('edited="03-12 15:32:01"');
     });
 
     it('keeps a late event at the end of the rendered context', () => {
@@ -341,16 +428,31 @@ describe('render', () => {
       const result = xml(render(ic([message({
         editedAtSec: 1741761120,
         editUtcOffsetMin: 480,
-      })])));
-      expect(result).toContain('edited="2025-03-12T14:32:00+08:00"');
+      })]), { localUtcOffsetMin: 480 }));
+      expect(result).toContain('edited="03-12 14:32:00"');
     });
 
     it('uses message utcOffset when editUtcOffsetMin is absent', () => {
       const result = xml(render(ic([message({
         editedAtSec: 1741761120,
-      })])));
-      expect(result).toContain('edited=');
-      expect(result).toContain('+08:00');
+      })]), { localUtcOffsetMin: 480 }));
+      expect(result).toContain('edited="03-12 14:32:00"');
+    });
+
+    it('keeps the edit date when it crosses into another day', () => {
+      const result = xml(render(ic([message({
+        editedAtSec: 1741761000 + 86400,
+        editUtcOffsetMin: 480,
+      })]), { localUtcOffsetMin: 480 }));
+      expect(result).toContain('edited="03-13 14:30:00"');
+    });
+
+    it('renders the edit offset when the edit clock differs from the deployment one', () => {
+      const result = xml(render(ic([message({
+        editedAtSec: 1741761120,
+        editUtcOffsetMin: -300,
+      })]), { localUtcOffsetMin: 480 }));
+      expect(result).toContain('edited="03-12 01:32:00 -05:00"');
     });
   });
 
@@ -478,11 +580,11 @@ describe('render', () => {
           thumbnailWebp: 'AAAA',
           altText: 'a cat sleeping on a windowsill',
         }],
-      })]));
+      })]), { localUtcOffsetMin: 480 });
       expect(rc[0]!.content).toHaveLength(1);
       expect(rc[0]!.content[0]).toEqual({
         type: 'text',
-        text: '<message id="42" sender="Alice (@alice)" t="2025-03-12T14:30:00+08:00">\nhello\n<image type="photo" size="800x600" file-id="42:0">a cat sleeping on a windowsill</image>\n</message>',
+        text: '<message id="42" sender="Alice (@alice)" t="03-12 14:30:00">\nhello\n<image type="photo" size="800x600" file-id="42:0">a cat sleeping on a windowsill</image>\n</message>',
       });
     });
 
@@ -528,11 +630,11 @@ describe('render', () => {
         oldUser: alice,
         newUser: { id: '1', displayName: 'Alice New', username: 'alice_new', isBot: false },
       };
-      const result = xml(render(ic([event])));
+      const result = xml(render(ic([event]), { localUtcOffsetMin: 480 }));
       expect(result).toContain('type="name_change"');
       expect(result).toContain('from_name="Alice (@alice)"');
       expect(result).toContain('to_name="Alice New (@alice_new)"');
-      expect(result).toContain('t="2025-03-12T14:30:00+08:00"');
+      expect(result).toContain('t="03-12 14:30:00"');
       expect(result).toContain('/>');
     });
 
@@ -663,6 +765,131 @@ describe('render', () => {
       expect(result).not.toContain('</event>');
     });
 
+  });
+
+  describe('message id aliases', () => {
+    it('renders short aliases everywhere when enabled', () => {
+      const rc = render(ic([
+        message({ messageId: 'om_x100b6214060334a4c0109a055669c5d' }),
+        message({
+          messageId: 'om_x100b621401001ca4c08d88f741bbff2',
+          receivedAtMs: 2000,
+          timestampSec: 1741761060,
+          replyToMessageId: 'om_x100b6214060334a4c0109a055669c5d',
+          replyToSender: alice,
+          replyToPreview: 'hello',
+          attachments: [{ type: 'photo' }],
+        }),
+      ]), { aliasMessageIds: true });
+      const text = xml(rc);
+      const aliases = [...text.matchAll(/id="(m[0-9a-z]+)"/g)].map(m => m[1]);
+      expect(aliases).toHaveLength(3);
+      const [first, , replyTarget] = aliases;
+      // The reply target in the second message points at the first message's alias.
+      expect(replyTarget).toBe(first);
+      expect(text).not.toContain('om_x100b6214060334a4c0109a055669c5d');
+      expect(text).toContain(`file-id="${aliases[1]}:0"`);
+      expect(text).toContain(`<in-reply-to id="${first}" sender="Alice (@alice)">hello</in-reply-to>`);
+    });
+
+    it('keeps canonical ids when aliasing is off', () => {
+      const text = xml(render(ic([message({ messageId: 'om_canonical' })])));
+      expect(text).toContain('id="om_canonical"');
+      expect(text).not.toMatch(/id="m[0-9a-z]{9}"/);
+    });
+
+    it('is stable when a new message arrives', () => {
+      const first = xml(render(ic([message({ messageId: 'a' })]), { aliasMessageIds: true }));
+      const second = xml(render(ic([
+        message({ messageId: 'a' }),
+        message({ messageId: 'b', receivedAtMs: 2000, timestampSec: 1741761060 }),
+      ]), { aliasMessageIds: true }));
+      expect(second.startsWith(first)).toBe(true);
+    });
+
+    it('aliases ids outside the context (reply target, pinned message) with the same pure function', () => {
+      const rc = render(ic([
+        message({ messageId: 'kept' }),
+        message({
+          messageId: 'reply',
+          receivedAtMs: 2000,
+          timestampSec: 1741761060,
+          replyToMessageId: 'outside',
+          replyToSender: bob,
+          replyToPreview: 'preview',
+        }),
+      ]), { aliasMessageIds: true });
+      const text = xml(rc);
+      expect(text).not.toContain('outside');
+      const inReply = /<in-reply-to id="(m[0-9a-z]+)"/.exec(text);
+      expect(inReply).not.toBeNull();
+      expect(inReply![1]).toBe(messageAlias('chat1', 'outside'));
+    });
+
+    it('keeps aliases stable when the compaction cursor moves', () => {
+      const nodes = [
+        message({ messageId: 'old', receivedAtMs: 1000, timestampSec: 1741761000 }),
+        message({ messageId: 'kept', receivedAtMs: 2000, timestampSec: 1741761060 }),
+        message({ messageId: 'newer', receivedAtMs: 3000, timestampSec: 1741761120 }),
+      ];
+      const withoutCursor = xml(render(ic(nodes), { aliasMessageIds: true }));
+      const withCursor = xml(render(ic(nodes), { aliasMessageIds: true, compactCursorMs: 2000 }));
+      const keptAlias = messageAlias('chat1', 'kept');
+      const newerAlias = messageAlias('chat1', 'newer');
+      expect(withoutCursor).toContain(`id="${keptAlias}"`);
+      expect(withCursor).toContain(`id="${keptAlias}"`);
+      expect(withCursor).toContain(`id="${newerAlias}"`);
+      expect(withCursor).not.toContain('id="old"');
+      // Appending a message after a cursor move leaves the retained aliases alone.
+      const extended = xml(render(ic([...nodes, message({ messageId: 'latest', receivedAtMs: 4000, timestampSec: 1741761180 })]), {
+        aliasMessageIds: true,
+        compactCursorMs: 2000,
+      }));
+      expect(extended).toContain(`id="${keptAlias}"`);
+      expect(extended).toContain(`id="${newerAlias}"`);
+    });
+
+    it('aliases deleted variants and message_pinned references', () => {
+      const pin: ICSystemEvent = {
+        type: 'system_event',
+        kind: 'message_pinned',
+        receivedAtMs: 2000,
+        timestampSec: 1741761060,
+        utcOffsetMin: 480,
+        messageId: 'om_pinned',
+        preview: 'pinned',
+      };
+      const text = xml(render(ic([message({ messageId: 'om_pinned', deleted: true }), pin]), { aliasMessageIds: true }));
+      expect(text).not.toContain('om_pinned');
+      const ids = [...text.matchAll(/(?:message_id|id)="(m[0-9a-z]+)"/g)].map(m => m[1]);
+      expect(new Set(ids).size).toBe(1);
+    });
+  });
+
+  describe('mention identity', () => {
+    it('keeps the mention uid for other participants', () => {
+      const content: ContentNode[] = [{ type: 'mention', userId: '99', children: [{ type: 'text', text: '@bob' }] }];
+      const result = xml(render(ic([message({ content })]), { senderUid: true }));
+      expect(result).toContain('<mention uid="99">@bob</mention>');
+    });
+
+    it('omits the mention uid when the sender is the mentioned participant', () => {
+      const content: ContentNode[] = [{ type: 'mention', userId: '1', children: [{ type: 'text', text: '@Alice' }] }];
+      const result = xml(render(ic([message({ content })]), { senderUid: true }));
+      expect(result).toContain('<mention>@Alice</mention>');
+      expect(result).toContain('sender="Alice (@alice)" uid="1"');
+    });
+
+    it('never elides the mention uid for Telegram', () => {
+      // Telegram renders no uid attribute, so a self-mention has nowhere else to
+      // carry the id and must keep it.
+      const self: ContentNode[] = [{ type: 'mention', userId: '1', children: [{ type: 'text', text: '@Alice' }] }];
+      const result = xml(render(ic([message({ content: self, messageId: 'tg' })])));
+      expect(result).toContain('<mention uid="1">@Alice</mention>');
+      // Telegram never renders a uid attribute on <message>; the mention above is
+      // the only place the id appears, so it must not be dropped.
+      expect(result).toContain('sender="Alice (@alice)" t=');
+    });
   });
 
   describe('viewport filtering', () => {

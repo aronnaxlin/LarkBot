@@ -40,6 +40,33 @@ describe('createAttachmentDownloader', () => {
     expect(downloadMessageMedia).not.toHaveBeenCalled();
   });
 
+  it('resolves an aliased message id in a file-id before the platform lookup', async () => {
+    const loadMessageAttachments = vi.fn(() => [{ type: 'photo' as const }]);
+    const downloadMessageMedia = vi.fn(async () => Buffer.from('synthetic-bytes'));
+    const download = createAttachmentDownloader({
+      chatId: CHAT,
+      loadMessageAttachments,
+      downloadMessageMedia,
+      resolveMessageId: id => (id === 'm0abc12345' ? 'om_canonical' : id),
+    });
+    await download('m0abc12345:0');
+    expect(loadMessageAttachments).toHaveBeenCalledWith(CHAT, 'om_canonical');
+    expect(downloadMessageMedia).toHaveBeenCalledWith(CHAT, 'om_canonical', 0);
+  });
+
+  it('passes canonical ids through when the resolver returns them unchanged', async () => {
+    const loadMessageAttachments = vi.fn(() => [{ type: 'photo' as const }]);
+    const downloadMessageMedia = vi.fn(async () => Buffer.from('synthetic-bytes'));
+    const download = createAttachmentDownloader({
+      chatId: CHAT,
+      loadMessageAttachments,
+      downloadMessageMedia,
+      resolveMessageId: id => id,
+    });
+    await download('om_canonical:0');
+    expect(loadMessageAttachments).toHaveBeenCalledWith(CHAT, 'om_canonical');
+  });
+
   it('rejects an empty download result', async () => {
     const download = createAttachmentDownloader({
       chatId: CHAT,

@@ -42,6 +42,13 @@ export interface PrimaryToolsDependencies extends Pick<
   chatConfig: PrimaryToolsConfig;
   runtimeConfig: RuntimeConfig;
   readOldMessages: (chatId: string, messageIds: string[]) => Promise<string> | string;
+  // Resolve a rendered alias (or a canonical id) to the canonical id used by
+  // the platform and by `messageExists`. Unknown input passes through so the
+  // existing unknown-id errors still apply.
+  resolveMessageId?: (raw: string) => string;
+  // Render a canonical message id the way the chatlog shows it, so a tool
+  // result that echoes a sent id stays consistent with the context.
+  formatMessageId?: (messageId: string) => string;
   resolveModel: (name: string) => LlmEndpoint;
   backgroundTask: {
     startTask: (
@@ -109,26 +116,40 @@ export const createPrimaryTools = (deps: PrimaryToolsDependencies): CahciuaTool[
     throw new Error('Platform attachment capability requires both loadMessageAttachments and downloadMessageMedia');
   const inboundAttachmentsSupported = loadMessageAttachments != null && downloadMessageMedia != null;
 
-  const messageExists = (messageId: string) => deps.messageExists(deps.chatId, messageId);
+  // send_message resolves its reply_to twice (existence check, then send) and
+  // react checks before setting; memoize per tool set so a wake-up resolves each
+  // id at most once, including unresolved aliases (cached as their raw value).
+  const resolvedMessageIds = new Map<string, string>();
+  const resolveMessageId = (raw: string): string => {
+    const cached = resolvedMessageIds.get(raw);
+    if (cached !== undefined) return cached;
+    const resolved = deps.resolveMessageId?.(raw) ?? raw;
+    resolvedMessageIds.set(raw, resolved);
+    return resolved;
+  };
+  const formatMessageId = (messageId: string): string => deps.formatMessageId?.(messageId) ?? messageId;
+  const messageExists = (messageId: string) => deps.messageExists(deps.chatId, resolveMessageId(messageId));
   const sendMessageTool = createSendMessageTool(async (text, replyTo, attachments) => {
+    const resolvedReplyTo = replyTo == null ? undefined : resolveMessageId(replyTo);
     deps.log.withFields({
       chatId: deps.chatId,
       text: text.length > 100 ? `${text.slice(0, 100)}...` : text,
-      replyTo,
+      replyTo: resolvedReplyTo,
       attachments: attachments?.length ?? 0,
     }).log('send_message tool called');
     const sent = await deps.sendMessage(
       deps.chatId,
       text,
-      replyTo,
+      resolvedReplyTo,
       attachments,
     );
-    return { messageId: sent.messageId };
+    return { messageId: formatMessageId(sent.messageId) };
   }, messageExists, { attachments: deps.supportsOutboundAttachments === true });
 
   const downloadAttachment = inboundAttachmentsSupported
     ? createAttachmentDownloader({
         chatId: deps.chatId,
+        resolveMessageId,
         loadMessageAttachments,
         downloadMessageMedia,
       })
@@ -140,7 +161,7 @@ export const createPrimaryTools = (deps: PrimaryToolsDependencies): CahciuaTool[
       ? [createBanSpammerTool(messageId => banSpammer(deps.chatId, messageId))]
       : []),
     createReactTool(
-      (messageId, emoji) => deps.setMessageReaction(deps.chatId, messageId, emoji),
+      (messageId, emoji) => deps.setMessageReaction(deps.chatId, resolveMessageId(messageId), emoji),
       messageExists,
     ),
   ];
@@ -173,7 +194,7 @@ export const createPrimaryTools = (deps: PrimaryToolsDependencies): CahciuaTool[
     createKillTaskTool(taskId => deps.backgroundTask.killTask(taskId)),
     createReadTaskOutputTool((taskId, offset, limit) =>
       deps.backgroundTask.readTaskOutput(taskId, offset, limit)),
-    createReadOldMessagesTool(messageIds => deps.readOldMessages(deps.chatId, messageIds)),
+    createReadOldMessagesTool(messageIds => deps.readOldMessages(deps.chatId, messageIds.map(resolveMessageId))),
     createSleepTool(),
     createEndTurnTool(),
   );

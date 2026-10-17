@@ -477,6 +477,20 @@ export const loadEventsWithId = (db: DB, chatId: string, afterMs?: number) =>
     .map(row => ({ id: row.id, event: reconstructEvent(row) }));
 
 /**
+ * Every message id persisted for one chat, without loading event payloads.
+ * Backs the alias-resolution fallback: a tool may quote an alias whose message
+ * is no longer in the live context (e.g. from an older summary after a
+ * restart), and hashing these ids back to the alias is far cheaper than
+ * reconstructing whole events.
+ */
+export const loadMessageIds = (db: DB, chatId: string): string[] =>
+  db.selectDistinct({ messageId: events.messageId })
+    .from(events)
+    .where(and(eq(events.chatId, chatId), eq(events.type, 'message')))
+    .all()
+    .flatMap(row => row.messageId == null ? [] : [row.messageId]);
+
+/**
  * Load the message/edit/delete events for specific message IDs in a single chat.
  * Backs the `read_old_messages` tool: the LLM supplies IDs it saw in the
  * chatlog, and we rebuild the same XML representation from persisted events.

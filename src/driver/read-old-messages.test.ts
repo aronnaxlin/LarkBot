@@ -42,4 +42,17 @@ describe('renderOldMessagesXml', () => {
     expect(xml).toContain('deleted="true"');
     expect(xml).not.toContain('secret');
   });
+
+  it('renders the same alias the live context uses for a message', () => {
+    // Aliases are a pure function of (chatId, messageId), so rendering a subset
+    // of history (read_old_messages) does not renumber it.
+    const live = renderOldMessagesXml('chat', [message('om_one', 'first', 1000), message('om_two', 'second', 2000)], {
+      aliasMessageIds: true,
+    });
+    const subset = renderOldMessagesXml('chat', [message('om_two', 'second', 2000)], { aliasMessageIds: true });
+    const liveAlias = /<message id="(m[0-9a-z]+)"[^>]*>\nsecond/.exec(live);
+    const subsetAlias = /<message id="(m[0-9a-z]+)"[^>]*>\nsecond/.exec(subset);
+    expect(liveAlias).not.toBeNull();
+    expect(subsetAlias![1]).toBe(liveAlias![1]);
+  });
 });

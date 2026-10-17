@@ -15,7 +15,7 @@ export const createDownloadFileTool = (deps: {
   parameters: {
     type: 'object',
     properties: {
-      file_id: { type: 'string', description: 'The \`file-id\` attribute of an attachment element. (Typical format: \`number:number\`)' },
+      file_id: { type: 'string', description: 'The \`file-id\` attribute of an attachment element, e.g. \`m4f8a2c01:0\`.' },
       path: { type: 'string', description: 'Destination file path in the workspace.' },
     },
     required: ['file_id', 'path'],

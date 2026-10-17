@@ -3,7 +3,9 @@ import type { Attachment } from '../telegram/message/types';
 import type { BanSpammerResult } from '../telegram/moderation-types';
 
 // Driver-facing chat platform capabilities. Message IDs are canonical strings;
-// any numeric conversion belongs inside the platform implementation.
+// any numeric conversion belongs inside the platform implementation. The driver
+// tools resolve rendered aliases to canonical ids before calling these methods,
+// so implementations never see an alias.
 //
 // Optional members are capabilities: when absent, the corresponding tools (or
 // tool parameters) are not exposed to the model at all.

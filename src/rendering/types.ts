@@ -10,6 +10,17 @@ export interface RenderParams {
   // senders' messages carry `maintainer="true"`; the bot's own messages never
   // do. Empty/absent means no attribute (byte-identical output).
   maintainers?: ReadonlySet<string>;
+  // Render long platform message ids as short stable aliases (`m<base36>`)
+  // everywhere they appear: `<message id>`, `<in-reply-to id>`, attachment
+  // `file-id`, `message_pinned`, and deleted/edited variants. Enabled for
+  // platforms whose native ids are long (Feishu `om_...`); Telegram keeps its
+  // short numeric ids so message deep links stay valid. Tool inputs resolve an
+  // alias back to the canonical id; canonical ids always stay accepted.
+  aliasMessageIds?: boolean;
+  // The deployment's usual local offset in minutes. Timestamps render a
+  // ` +HH:MM` suffix only when an event's offset differs from this one. Defaults
+  // to the process offset at startup.
+  localUtcOffsetMin?: number;
   // Users whose messages should render as a self-closing `<message blocked="true"/>`
   // with no content. Sender info is kept so the model can see who was blocked.
   // Blocked messages also suppress `mentionsMe` / `repliesToMe`, so they can't

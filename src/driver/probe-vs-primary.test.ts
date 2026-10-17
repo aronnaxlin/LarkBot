@@ -10,6 +10,7 @@ vi.mock('../llm/call', async importOriginal => {
 });
 
 import { createDriver } from './index';
+import { DEFAULT_PROBE_TIMEOUT_MS } from './turn-budget';
 import { DEFAULT_TURN_BUDGET } from './turn-loop';
 import type { TurnResponseV2 } from './types';
 import type { ResolvedChatConfig } from '../config/config';
@@ -34,6 +35,7 @@ const makeChatConfig = (): ResolvedChatConfig => ({
   compaction: { maxContextEstTokens: 200000, workingWindowEstTokens: 8000 },
   probe: {
     model: { apiBaseUrl: 'mock', apiKey: 'k', model: 'mock-probe', apiFormat: 'openai-chat' },
+    timeoutMs: DEFAULT_PROBE_TIMEOUT_MS,
   },
   imageToText: { enabled: false, maxConcurrency: 1 },
   animationToText: { enabled: false, maxFrames: 0, maxConcurrency: 1 },

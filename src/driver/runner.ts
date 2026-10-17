@@ -74,7 +74,8 @@ export const createRunner = (config: RunnerConfig) => {
       if (remainingSec <= 0)
         throw new Error(`Turn deadline reached before model step ${params.step}`);
       // Transports treat a falsy timeoutSec as "no timeout".
-      const timeoutSec = config.timeoutSec ? Math.min(config.timeoutSec, remainingSec) : remainingSec;
+      const cappedByDeadline = !config.timeoutSec || remainingSec < config.timeoutSec;
+      const timeoutSec = cappedByDeadline ? remainingSec : config.timeoutSec!;
       return callLlm(
         { ...config, timeoutSec, forceToolChoice: params.forceToolChoice },
         params.entries,
@@ -86,7 +87,14 @@ export const createRunner = (config: RunnerConfig) => {
           dumpId: params.chatId,
           maxImagesAllowed: params.maxImagesAllowed,
         },
-      );
+      ).catch((error: unknown) => {
+        // A timeout we shortened to the remaining deadline is deadline expiry,
+        // not a provider failure, so the scheduler must not retry it. A
+        // provider timeout below the remaining deadline stays as thrown.
+        if (cappedByDeadline && error instanceof Error && error.message.includes('request timed out after'))
+          throw new Error(`Turn deadline reached during model step ${params.step}`, { cause: error });
+        throw error;
+      });
     };
 
     let result = await invokeModel();

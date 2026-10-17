@@ -7,7 +7,7 @@ import type { createRunner } from './runner';
 import { createDecideTool, extractDecideResult, toToolSchema } from './tools';
 import type { CahciuaTool } from './tools';
 import { countParticipationCalls, countWorkToolCalls, DEFAULT_TURN_BUDGET } from './turn-loop';
-import type { ProbeResponseV2, ResolvedChatConfig, TurnBudget, TurnBudgetUsage, TurnResponseV2 } from './types';
+import type { ProbeActivation, ProbeResponseV2, ResolvedChatConfig, TurnBudget, TurnBudgetUsage, TurnResponseV2 } from './types';
 import type { ActiveTaskInfo } from '../background-task/types';
 import { callLlm } from '../llm/call';
 import type { RenderedContext } from '../rendering/types';
@@ -61,10 +61,13 @@ export const executeWakeup = async (params: {
   getLastProcessedMs: () => number;
   setLastProcessedMs: (value: number) => void;
   turnBudget?: TurnBudget;
+  // Set when retrying this context after primary failed transiently: probe
+  // already activated it, so judging again would only add latency.
+  probeActivation?: ProbeActivation;
+  onProbeActivated?: (activation: ProbeActivation) => void;
   log: Logger;
 }): Promise<void> => {
   const budget = params.turnBudget ?? DEFAULT_TURN_BUDGET;
-  const deadlineAtMs = Date.now() + budget.deadlineMs;
   const turnResponses = await params.loadTurnResponses(params.chatId, params.cursorMs);
   const primaryContext = composeContext(
     params.contextAtStart,
@@ -89,7 +92,11 @@ export const executeWakeup = async (params: {
   const timeNow = localTimeNow();
   let probeReason: string | undefined;
 
-  if (!interrupted) {
+  if (!interrupted && params.probeActivation) {
+    params.log.withFields({ chatId: params.chatId, reason: params.probeActivation.reason })
+      .log('Reusing probe activation from the failed attempt');
+    probeReason = params.probeActivation.reason;
+  } else if (!interrupted) {
     params.log.withFields({
       chatId: params.chatId,
       lastProcessedMs: params.getLastProcessedMs(),
@@ -120,14 +127,12 @@ export const executeWakeup = async (params: {
 
     const decideTool = createDecideTool();
     const requestedAtMs = Date.now();
-    const remainingSec = (deadlineAtMs - Date.now() - budget.minModelCallMs) / 1000;
-    if (remainingSec <= 0) throw new Error('Turn deadline reached before probe');
     const probeModel = params.chatConfig.probe.model;
-    const probeTimeout = probeModel.timeoutSec;
+    const probeTimeoutSec = params.chatConfig.probe.timeoutMs / 1000;
     const result = await callLlm(
       {
         ...probeModel,
-        timeoutSec: probeTimeout ? Math.min(probeTimeout, remainingSec) : remainingSec,
+        timeoutSec: probeModel.timeoutSec ? Math.min(probeModel.timeoutSec, probeTimeoutSec) : probeTimeoutSec,
         // Thinking-mode providers reject a forced tool_choice; they still call
         // `decide` on their own when the choice is left free.
         forceToolChoice: probeModel.forceToolChoice === false ? undefined : { name: 'decide' },
@@ -163,8 +168,11 @@ export const executeWakeup = async (params: {
     params.setLastProcessedMs(requestedAtMs);
     if (!activated) return;
     probeReason = decision.reason;
+    params.onProbeActivated?.({ reason: decision.reason });
   }
 
+  // The primary deadline starts here, so a slow probe cannot eat into it.
+  const deadlineAtMs = Date.now() + budget.deadlineMs;
   let typingInterval: ReturnType<typeof setInterval> | undefined;
   const sendTyping = (): void => {
     void params.sendTypingAction(params.chatId).catch(error =>

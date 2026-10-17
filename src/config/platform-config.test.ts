@@ -57,6 +57,23 @@ describe('platform configuration', () => {
     })).toThrow();
   });
 
+  it('defaults and overrides the probe timeout independently of the primary deadline', () => {
+    const config = fixture({ platform: 'feishu' }, {
+      oc_synthetic: {},
+      oc_slow: { probe: { timeoutMs: 20000 } },
+    });
+    expect(resolveChatConfig(config, 'oc_synthetic').probe.timeoutMs).toBe(15000);
+    expect(resolveChatConfig(config, 'oc_slow').probe.timeoutMs).toBe(20000);
+    for (const timeoutMs of [0, 999, 120_001, 1500.5])
+      expect(() => fixture({ platform: 'feishu' }, { oc_synthetic: { probe: { timeoutMs } } })).toThrow();
+    for (const timeoutMs of [1_000, 120_000])
+      expect(resolveChatConfig(fixture({ platform: 'feishu' }, { oc_synthetic: { probe: { timeoutMs } } }), 'oc_synthetic').probe.timeoutMs).toBe(timeoutMs);
+    expect(() => fixture({ platform: 'feishu' }, {
+      default: { tools: {}, probe: { timeoutMs: 500 } },
+      oc_synthetic: {},
+    })).toThrow();
+  });
+
   it('rejects Telegram-only moderation on Feishu chats', () => {
     expect(() => fixture({ platform: 'feishu' }, { 'oc_synthetic': { tools: { banSpammer: true } } }))
       .toThrow('tools.banSpammer is not supported');

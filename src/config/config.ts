@@ -5,7 +5,7 @@ import { merge } from 'es-toolkit';
 import * as v from 'valibot';
 import { parse as parseYaml } from 'yaml';
 
-import { DEFAULT_TURN_BUDGET } from '../driver/turn-budget';
+import { DEFAULT_PROBE_TIMEOUT_MS, DEFAULT_TURN_BUDGET } from '../driver/turn-budget';
 import type { CompactionConfig, DebounceConfig, TurnBudget } from '../driver/types';
 import type { WebFetchConfig } from '../driver/web-fetch/types';
 import type { WebSearchConfig } from '../driver/web-search/types';
@@ -46,6 +46,11 @@ const TurnBudgetOverrideSchema = v.partial(v.object({
   minModelCallMs: v.pipe(v.number(), v.integer(), v.minValue(1)),
 }));
 
+// Probe HTTP bound, separate from primary.turnBudget.deadlineMs; the endpoint's
+// timeoutSec still applies if lower. Below 1 s no real probe can finish; above
+// 2 min a stuck probe would hold the chat's serialized scheduler too long.
+const ProbeTimeoutMsSchema = v.pipe(v.number(), v.integer(), v.minValue(1_000), v.maxValue(120_000));
+
 const ChatConfigSchema = v.object({
   primary: v.optional(v.object({
     model: v.optional(v.string(), 'primary'),
@@ -66,6 +71,7 @@ const ChatConfigSchema = v.object({
   }), {}),
   probe: v.optional(v.object({
     model: v.optional(v.string()),
+    timeoutMs: v.optional(ProbeTimeoutMsSchema, DEFAULT_PROBE_TIMEOUT_MS),
   }), {}),
   imageToText: v.optional(v.object({
     enabled: v.optional(v.boolean(), false),
@@ -126,6 +132,7 @@ const ChatOverrideSchema = v.optional(v.partial(v.object({
   })),
   probe: v.partial(v.object({
     model: v.pipe(v.string(), v.minLength(1)),
+    timeoutMs: ProbeTimeoutMsSchema,
   })),
   imageToText: v.partial(v.object({
     enabled: v.boolean(),
@@ -211,7 +218,7 @@ export interface ResolvedChatConfig {
   blockedUserIds: string[];
   debounce: DebounceConfig;
   compaction: CompactionConfig;
-  probe: { model: LlmEndpoint };
+  probe: { model: LlmEndpoint; timeoutMs: number };
   imageToText: { enabled: boolean; model?: string; maxConcurrency: number };
   animationToText: { enabled: boolean; model?: string; maxFrames: number; maxConcurrency: number };
   customEmojiToText: { enabled: boolean; model?: string; maxFrames: number; maxConcurrency: number };
@@ -320,6 +327,7 @@ export const resolveChatConfig = (config: Config, chatId: string): ResolvedChatC
     },
     probe: {
       model: merged.probe.model ? resolveModel(config, merged.probe.model) : primaryModel,
+      timeoutMs: merged.probe.timeoutMs,
     },
     imageToText: {
       enabled: merged.imageToText.enabled,

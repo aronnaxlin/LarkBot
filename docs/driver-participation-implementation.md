@@ -24,7 +24,7 @@ This records what was implemented for legitimate silence, reaction-only endings,
 | --- | --- | --- |
 | `maxToolRounds` | 2 | Regular model steps (all tools visible) before the wrap-up |
 | `maxToolCalls` | 4 | Work-tool calls; `send_message`, `react`, `end_turn` are exempt |
-| `deadlineMs` | 15 000 | Per wake-up execution, measured from `executeWakeup` entry, probe included |
+| `deadlineMs` | 15 000 | Per wake-up execution, measured from `executeWakeup` entry, probe included (superseded 2026-10-17: now measured from primary start; probe has its own `probe.timeoutMs`, see [integration-status.md](integration-status.md#turn-liveness-2026-10-17)) |
 | `minModelCallMs` | 2 000 | A model call starts only if at least this much of the deadline remains |
 
 The first three are the starting values from the project discussion; `minModelCallMs` was added so a model call is never started with a few milliseconds of timeout. All four are suggestions to tune against real model latency.
@@ -125,7 +125,7 @@ Dependencies were installed in this worktree with `pnpm install --frozen-lockfil
 - Configurable budget through chat config (seam above).
 - A hard wall-clock turn timeout. Tools are not preemptible, and `sleep` (300 s), `download_file` (60 s), and `web_fetch` (30 s) can each exceed the 15 s deadline. Suggested follow-ups, outside this branch's ownership: cap `sleep` at the remaining deadline or remove it from primary; give `read_image`'s model a timeout.
 - Staleness check before speaking (dropping a drafted reply after the topic moved on), burst merging beyond the existing debounce, and silent background work without a report wake-up.
-- Graceful handling of a deadline-aborted model call. It surfaces as an `LLM call failed` error, and the scheduler waits for new input (`failedRc`), as with any model error.
+- Graceful handling of a deadline-aborted model call. It surfaces as an `LLM call failed` error, and the scheduler waits for new input (`failedRc`), as with any model error. (Superseded 2026-10-17: transient model failures are now retried on the same context before `failedRc` applies.)
 - Moderation announcements are no longer guaranteed. With the fallback gone and `ban_spammer` counting as a work call, the anonymous announcement depends on primary sending it; a deadline close after a ban leaves it unsent. `ban_spammer` remains opt-in and off by default.
 - Platform wording (`currentChannel: 'telegram'`, "Telegram group chat" in prompts) and the "You are open-source: Cahciua" disclosure section are unchanged and need maintainer/platform decisions.
 

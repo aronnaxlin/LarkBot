@@ -42,7 +42,7 @@ export interface DebounceConfig {
 }
 
 // Primary tool-loop budget. Counts accumulate across an interruption chain
-// (TRs joined by requiresFollowUp); the deadline is per wake-up execution.
+// (TRs joined by requiresFollowUp); the deadline is per primary execution.
 export interface TurnBudget {
   // Regular model steps (all tools visible) before the tool-less wrap-up.
   maxToolRounds: number;
@@ -50,11 +50,18 @@ export interface TurnBudget {
   maxToolCalls: number;
   // Combined send_message/react attempts across the chain; end_turn is exempt.
   maxParticipationCalls?: number;
-  // Measured from executeWakeup entry, probe included.
+  // Measured from the start of primary in this wake-up; probe time is bounded
+  // separately by the chat's probe.timeoutMs and never consumes it.
   deadlineMs: number;
   // A model call starts only with at least this much deadline left; its HTTP
   // timeout is the remaining time, capped by the endpoint's timeoutSec.
   minModelCallMs: number;
+}
+
+// A probe that activated primary for a context whose primary then failed
+// transiently; a retry of that same context reuses it instead of re-judging.
+export interface ProbeActivation {
+  reason: string;
 }
 
 export interface TurnBudgetUsage {

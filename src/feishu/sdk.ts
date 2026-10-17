@@ -173,6 +173,12 @@ export const createFeishuSdk = (credentials: FeishuCredentials, logger: Logger) 
         loggerLevel: lark.LoggerLevel.info,
         autoReconnect: true,
         handshakeTimeoutMs: 15_000,
+        // Without this the SDK never notices a half-open socket: it pings every
+        // 120s but only arms a pong watchdog when `pingTimeout` is set, and a
+        // switched network (or restarted proxy) can leave the old TCP
+        // connection ESTABLISHED at our end while the peer is gone, so events
+        // are silently lost until something writes to the dead socket.
+        wsConfig: { pingTimeout: 10 },
         onReady: () => {
           log.log('Feishu long connection ready');
           resolve();

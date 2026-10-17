@@ -5,6 +5,7 @@ vi.mock('../llm/call', () => ({ callLlm: vi.fn() }));
 
 import { createRunner } from './runner';
 import { createTool } from './tools/create-tool';
+import { isTransientModelError } from './transient-error';
 import { DEFAULT_TURN_BUDGET } from './turn-loop';
 import type { TurnBudget } from './types';
 import { callLlm, type LlmCallUsage } from '../llm/call';
@@ -543,6 +544,38 @@ describe('runner turn budget', () => {
       expect(send.execute).not.toHaveBeenCalled();
       expect(persistedResults(onStepComplete, 0)).toHaveLength(3);
       expect(persistedResults(onStepComplete, 0).every(result => !result.requiresFollowUp)).toBe(true);
+    });
+
+    const failingStep = (timeoutSec: number | undefined, deadlineMs: number) => {
+      const { send, react, endTurn } = participationTools();
+      mockCallLlm.mockImplementation(async config => {
+        throw new Error(`chat request timed out after ${config.timeoutSec}s`);
+      });
+      return createRunner({
+        apiBaseUrl: 'mock', apiKey: 'key', model: 'mock-model', apiFormat: 'openai-chat', timeoutSec,
+      }).runStepLoop({
+        chatId: 'timeout-kind', entries: initialEntries, system: 'system',
+        tools: [send.tool, react.tool, endTurn.tool],
+        budget: DEFAULT_TURN_BUDGET, deadlineAtMs: Date.now() + deadlineMs,
+        onStepComplete: async () => {}, checkInterrupt: () => false, log: logger,
+      });
+    };
+
+    it.each([
+      ['the endpoint timeout exceeds the remaining deadline', 120],
+      ['the endpoint has no timeout', undefined],
+    ])('reports a deadline-capped model timeout as permanent deadline expiry when %s', async (_name, timeoutSec) => {
+      const error = await failingStep(timeoutSec, 10_000).catch((caught: unknown) => caught);
+      expect(error).toBeInstanceOf(Error);
+      expect((error as Error).message).toBe('Turn deadline reached during model step 1');
+      expect(((error as Error).cause as Error).message).toMatch(/request timed out after/);
+      expect(isTransientModelError(error)).toBe(false);
+    });
+
+    it('keeps a provider timeout shorter than the remaining deadline transient', async () => {
+      const error = await failingStep(5, 10_000).catch((caught: unknown) => caught);
+      expect((error as Error).message).toBe('chat request timed out after 5s');
+      expect(isTransientModelError(error)).toBe(true);
     });
 
     it('does not start a model call once the deadline has passed', async () => {

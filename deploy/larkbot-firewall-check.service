@@ -1,0 +1,20 @@
+[Unit]
+Description=LarkBot sandbox firewall check (logs loudly when egress rules are missing)
+Documentation=https://github.com/aronnaxlin/LarkBot/blob/main/docs/deploy.md
+After=larkbot-firewall.service
+
+[Service]
+Type=oneshot
+# SUBNET, DNS_RESOLVERS and BYPASS_TUN must match the firewall service (and
+# docker-compose.yml) — keep them in /etc/default/larkbot-firewall.
+EnvironmentFile=-/etc/default/larkbot-firewall
+# A failed check stops the sandbox container: the firewall unit is ordered
+# before docker.service but deliberately not required by it (a firewall typo
+# must not take every other container on the host down), so this timer is
+# what keeps an unfiltered sandbox from running for more than a few minutes.
+ExecStart=/bin/sh -c '/usr/local/sbin/larkbot-firewall --check && exit 0; \
+  docker ps -q --filter label=com.docker.compose.project=larkbot \
+    --filter label=com.docker.compose.service=sandbox | xargs -r docker stop; \
+  echo "larkbot-firewall: check failed, sandbox stopped" >&2; exit 1'
+# On failure the exit status and the MISSING lines land in the journal:
+#   journalctl -u larkbot-firewall-check.service -n 50

@@ -1,0 +1,10 @@
+# Build context for deploy/sandbox.Dockerfile (context: deploy/).
+# Nothing but the image sources should ever be sent to the daemon.
+.env
+docker-compose.override.yml
+sandbox_key
+sandbox_known_hosts
+sandbox_authorized_keys
+secrets
+*.pem
+*.key

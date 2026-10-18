@@ -1,7 +1,7 @@
 # LarkBot
 
 > [!WARNING]
-> Work in progress. LarkBot is under active development and is not ready for use. A Feishu/Lark adapter with bounded, optional participation is implemented and has run in a real private group (live runs on 2026-10-16 and 2026-10-17). Long-term memory, a trusted maintainer list, and isolated Bash/browser access are still planned. This is not a production-ready release.
+> Work in progress. LarkBot is under active development and is not ready for use. A Feishu/Lark adapter with bounded, optional participation is implemented and has run in a real private group (live runs on 2026-10-16 and 2026-10-17). Long-term memory and browser access are still planned; Bash execution is isolated by the Docker deployment ([docs/deploy.md](docs/deploy.md)), and shell tools are exposed only after a configured maintainer speaks (see [AGENTS.md](AGENTS.md#maintainers)). This is not a production-ready release.
 
 LarkBot is a Feishu/Lark-first, LLM-driven group-chat bot for a small private community. It is meant to hang out in a group, with its own personality and memories—not to serve as a personal assistant or a productivity tool.
 
@@ -17,7 +17,7 @@ Because substantial changes are planned and the direction differs from upstream,
 - Mention-triggered and ambient participation, with the freedom to respond, react, decline, or stay silent—even after using tools.
 - A consistent identity and personality, with long-term memories of individual group members.
 - An explicitly configured owner/maintainer list, separate from conversational memory.
-- Bounded tool execution for timely conversation, with isolated Bash and browser access when needed.
+- Bounded tool execution for timely conversation, with isolated Bash access in the Docker deployment and browser access when needed.
 - Feishu context lookup through CLI/Skills or MCP, alongside the existing context compaction mechanism.
 
 ## Setup
@@ -30,9 +30,11 @@ cp prompts/IDENTITY.example.md prompts/IDENTITY.md   # then write the bot's pers
 
 `prompts/IDENTITY.md` is deployment-local and gitignored (`prompts/.gitignore`); `prompts/IDENTITY.example.md` is the tracked neutral template showing the expected sections. Replace its sample text with your own persona and delete its one template comment. Both are loaded through the chat's `systemFiles` list in `config.yaml`.
 
+To run the bot with Docker Compose, including the separately sandboxed Bash tool, see [docs/deploy.md](docs/deploy.md).
+
 ## Development
 
-The inherited implementation uses TypeScript, Node.js >=22, pnpm, and SQLite. See the implementation notes for the current scope, configuration, and remaining limitations. Browser isolation, per-person long-term memory, and maintainer authorization are still planned; the inherited Bash tool is not automatically sandboxed:
+The inherited implementation uses TypeScript, Node.js >=22, pnpm, and SQLite. See the implementation notes for the current scope, configuration, and remaining limitations. Browser isolation and per-person long-term memory are still planned; shell tools are exposed only after a configured maintainer speaks (`tools.bash.requireMaintainer`), and the Docker deployment ([docs/deploy.md](docs/deploy.md)) runs the Bash tool in a separate sandbox container:
 
 - [Feishu implementation notes](docs/feishu-implementation.md)
 - [Integration status](docs/integration-status.md)

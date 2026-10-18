@@ -1,0 +1,165 @@
+# LarkBot deployment for a single arm64 (or amd64) Docker host.
+#
+#   cd deploy && sudo docker compose up -d --build
+#
+# See docs/deploy.md for the full runbook (secrets, host key pinning, firewall,
+# backup, rollback, data-directory override). The two services are deliberately
+# split:
+#
+#   larkbot  — the bot process, host networking, no published ports.
+#   sandbox  — the only place the Bash tool runs; SSHD on 127.0.0.1:2222 only.
+#
+# The sandbox is a separate container, not a separate machine: it bounds what
+# the Bash tool can read (nothing of the bot's config, DB, prompts or keys) and
+# firewall.sh (a host script, run separately) bounds what it can reach.
+
+name: larkbot
+
+services:
+  larkbot:
+    build:
+      context: ..
+      dockerfile: Dockerfile
+    image: larkbot:local
+    # The magpie gateway listens on the host's 127.0.0.1:3425 and Feishu needs
+    # outbound HTTPS/WSS; the host network namespace gives both, and the bot
+    # publishes nothing itself.
+    network_mode: host
+    restart: unless-stopped
+    # tini as PID 1, so `docker compose stop` reaches `node` (the image runs
+    # `node --import tsx src/index.ts` directly, not through a `tsx`/`pnpm`
+    # wrapper, so src/startup's SIGTERM handler runs and SQLite closes cleanly).
+    init: true
+    # The host has ~900 MB free and magpie shares it. 512m is well above a live
+    # run's peak; NODE_OPTIONS caps V8 old space at 320m (see the Dockerfile)
+    # so the heap stays well inside the cgroup limit and a leak surfaces as a
+    # controlled V8 OOM instead of the kernel OOM-killer picking a victim. No
+    # swap on the host, hence memswap_limit == mem_limit.
+    mem_limit: 512m
+    memswap_limit: 512m
+    cpus: 1
+    # Prefer killing the bot over the host's other services if memory ever runs
+    # out (higher = killed first).
+    oom_score_adj: 300
+    pids_limit: 256
+    # The image already sets USER node (uid 1000); repeat it so a compose-level
+    # `user:` change is impossible to forget when the volume ownership matters.
+    user: "1000:1000"
+    # Nothing the app writes belongs on the writable layer:
+    #  - /tmp/cahciua is its own small tmpfs for LLM request/response dumps (one
+    #    pair per chat, overwritten in place). Separated from /tmp so a runaway
+    #    background shell task cannot fill it and stall every model call.
+    #  - /tmp is a second, larger tmpfs for background-task live output
+    #    (src/background-task/shell.ts writes cahciua-shell-*.txt via TMPDIR).
+    #    That file is not size-capped by the app, so keep this comfortably
+    #    larger than the output a task may produce; ENOSPC here fails the task.
+    read_only: true
+    tmpfs:
+      # LLM request/response dumps (one pair per chat, overwritten in place).
+      # Kept separate from /tmp so a runaway background shell task cannot fill
+      # it and stall every model call.
+      - /tmp/cahciua:mode=1777,size=24m
+      # Background-task live output (src/background-task/shell.ts writes
+      # os.tmpdir()/cahciua-shell-*.txt, and os.tmpdir() is /tmp here). The app
+      # does not size-cap that file, so keep this larger than any expected
+      # build/test log; ENOSPC fails the task.
+      - /tmp:mode=1777,size=64m
+    cap_drop: [ALL]
+    security_opt:
+      - no-new-privileges:true
+    stop_grace_period: 20s
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"
+    environment:
+      # Set to "1" when migrating an existing deployment: the entrypoint then
+      # refuses to start if config.yaml's database.path does not exist, instead
+      # of silently creating an empty database.
+      LARKBOT_REQUIRE_EXISTING_DB: "0"
+    volumes:
+      # SQLite DB and background-task output. Named so the image's /app/data
+      # ownership (node, uid 1000) is what the volume starts with. To keep the
+      # database on a specific filesystem, use the override example
+      # (docker-compose.override.example.yml) instead of editing this file.
+      - larkbot-data:/app/data
+      # All read-only. `config.yaml` (which holds the Feishu app id/secret and
+      # the model API keys) and IDENTITY.md must be readable by uid 1000 (0644
+      # or chown 1000:1000); the SSH key must be mode 600 and owned by uid 1000
+      # (docs/deploy.md).
+      - ../config.yaml:/app/config.yaml:ro
+      - ../prompts/IDENTITY.md:/app/prompts/IDENTITY.md:ro
+      - ../.config/sandbox_key:/home/node/.ssh/id_sandbox:ro
+      - ../.config/sandbox_known_hosts:/home/node/.ssh/known_hosts:ro
+      # Add one read-only mount per extra deployment-local prompt file listed
+      # in a chat's systemFiles, e.g.:
+      # - ../prompts/group-policy.md:/app/prompts/group-policy.md:ro
+
+  sandbox:
+    build:
+      # deploy/ only: the sandbox image needs nothing from the repository.
+      context: .
+      dockerfile: sandbox.Dockerfile
+    image: larkbot-sandbox:local
+    restart: unless-stopped
+    # Its own bridge with a fixed subnet so firewall.sh can name it.
+    networks:
+      sandbox-net:
+    # Public resolvers, so DNS never needs the host's or the LAN's resolver.
+    # Keep this list in sync with DNS_RESOLVERS in firewall.sh: port 53 is
+    # dropped for every other destination.
+    dns:
+      - 1.1.1.1
+      - 8.8.8.8
+    ports:
+      # SSH is reachable from the host's loopback only; nothing on the LAN can
+      # connect, and the bot reaches it through the host network namespace.
+      - "127.0.0.1:2222:2222"
+    # Root filesystem read-only; only /tmp, /run and the work volume are
+    # writable. /run holds sshd's privsep directory and pid file.
+    read_only: true
+    tmpfs:
+      - /tmp:mode=1777,size=32m
+      - /run:mode=755,size=8m
+    mem_limit: 192m
+    memswap_limit: 192m
+    cpus: 1
+    # Killed before the bot when memory is tight.
+    oom_score_adj: 500
+    pids_limit: 64
+    volumes:
+      # The Bash tool's workspace. Named volume by default; the override
+      # example shows binding it to a dedicated, size-limited filesystem.
+      - sandbox-work:/home/sandbox/work
+      # The host key lives here so it survives container recreation; the bot
+      # pins it in known_hosts. Delete the volume only together with that file.
+      - sandbox-host-keys:/etc/ssh/host_keys
+      # Root-owned 0644 (or the sandbox uid's 0600) on the host: sshd's
+      # StrictModes rejects a file owned by any other uid. docs/deploy.md says
+      # how to generate it.
+      - ../.config/sandbox_authorized_keys:/etc/ssh/authorized_keys/sandbox:ro
+    cap_drop: [ALL]
+    cap_add:
+      # sshd starts as root, binds 2222 (unprivileged, no NET_BIND_SERVICE
+      # needed) and immediately drops to `sandbox`:
+      - SETUID   # drop to the sandbox uid
+      - SETGID   # drop to the sandbox gid
+      - CHOWN    # chown the session's pty/stdout for that user
+      - SYS_CHROOT  # privsep pre-auth child chroots itself into /run/sshd
+      - AUDIT_WRITE  # sshd's audit support writes a record when it allocates a PTY; without the capability linux_audit_write_entry() fails and the session child exits
+    security_opt:
+      - no-new-privileges:true
+
+networks:
+  sandbox-net:
+    driver: bridge
+    ipam:
+      config:
+        # Keep in sync with SUBNET in firewall.sh.
+        - subnet: 172.31.250.0/24
+
+volumes:
+  larkbot-data:
+  sandbox-work:
+  sandbox-host-keys:

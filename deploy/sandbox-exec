@@ -1,0 +1,158 @@
+#!/bin/sh
+# Execute a command or transfer a file inside the LarkBot sandbox container over
+# SSH. This is what LarkBot's Bash tool calls; it is installed in the bot image
+# as /usr/local/bin/sandbox-exec and referenced from config.yaml as:
+#
+#   runtime:
+#     shell:     ["/usr/local/bin/sandbox-exec", "shell"]   # + <command> argv
+#     writeFile: ["/usr/local/bin/sandbox-exec", "write"]   # + <path>, stdin
+#     readFile:  ["/usr/local/bin/sandbox-exec", "read"]    # + <path>, stdout
+#
+# Each mode opens its own SSH connection; the `shell` branch below explains why
+# it allocates a PTY while `read`/`write` stay binary-clean without one.
+#
+# Deployment knobs (defaults match deploy/docker-compose.yml; override through
+# the bot container's environment if your layout differs):
+#   SANDBOX_SSH_HOST      default 127.0.0.1
+#   SANDBOX_SSH_PORT      default 2222
+#   SANDBOX_SSH_USER      default sandbox
+#   SANDBOX_SSH_KEY       default /home/node/.ssh/id_sandbox
+#   SANDBOX_KNOWN_HOSTS   default /home/node/.ssh/known_hosts
+#   SANDBOX_HTTP_PROXY    optional, e.g. http://172.31.250.1:3128. Exported to
+#                         shell-mode commands as HTTP_PROXY/HTTPS_PROXY/
+#                         ALL_PROXY (and the lowercase spellings). Use it to
+#                         point the Bash tool at a filtering proxy; read/write
+#                         modes are unaffected. See docs/deploy.md 3.8.
+#   SANDBOX_NO_PROXY      optional comma-separated NO_PROXY list to go with it.
+#
+# The command, the path and both proxy values are base64-encoded into the fixed
+# remote command string rather than interpolated: base64 output contains no
+# shell metacharacters, so quotes, `$()`, newlines and unicode in the bot's
+# command reach the remote shell byte-for-byte with no quoting layer to get
+# wrong. The proxy values are additionally validated before use, so a typo
+# fails here with a clear message instead of inside the sandbox.
+
+set -eu
+
+host=${SANDBOX_SSH_HOST:-127.0.0.1}
+port=${SANDBOX_SSH_PORT:-2222}
+user=${SANDBOX_SSH_USER:-sandbox}
+key=${SANDBOX_SSH_KEY:-/home/node/.ssh/id_sandbox}
+known_hosts=${SANDBOX_KNOWN_HOSTS:-/home/node/.ssh/known_hosts}
+
+mode=${1:-}
+if [ "$#" -lt 1 ] || [ -z "$mode" ]; then
+  echo "sandbox-exec: usage: sandbox-exec shell <command> | read|write <path>" >&2
+  exit 2
+fi
+shift
+
+# -w0: no line wrapping, so the encoded value is one shell-safe token.
+encode() { printf '%s' "$1" | base64 -w0; }
+
+# Validate an http(s)/socks proxy URL: scheme, host, optional port, optional
+# trailing slash. No userinfo, no path, no query — anything else is a
+# configuration mistake and must not be forwarded to the sandbox.
+validate_proxy_url() {
+  case "$1" in
+    http://*|https://*|socks5://*|socks5h://*) ;;
+    *) echo "sandbox-exec: SANDBOX_HTTP_PROXY must start with http://, https://, socks5:// or socks5h://" >&2; exit 2 ;;
+  esac
+  _pv_rest=${1#*://}
+  case "$_pv_rest" in */) _pv_rest=${_pv_rest%/} ;; esac
+  case "$_pv_rest" in
+    ""|*[!A-Za-z0-9.:-]*)
+      echo "sandbox-exec: SANDBOX_HTTP_PROXY must be host[:port] (no path, userinfo or query): '$1'" >&2
+      exit 2
+      ;;
+  esac
+  case "$_pv_rest" in
+    *:*)
+      _pv_host=${_pv_rest%:*}
+      _pv_port=${_pv_rest##*:}
+      case "$_pv_host" in ""|*[!A-Za-z0-9.-]*) echo "sandbox-exec: SANDBOX_HTTP_PROXY has an invalid host: '$1'" >&2; exit 2 ;; esac
+      case "$_pv_port" in ""|*[!0-9]*) echo "sandbox-exec: SANDBOX_HTTP_PROXY port must be numeric: '$1'" >&2; exit 2 ;; esac
+      if [ "$_pv_port" -lt 1 ] || [ "$_pv_port" -gt 65535 ]; then
+        echo "sandbox-exec: SANDBOX_HTTP_PROXY port must be 1-65535: '$1'" >&2
+        exit 2
+      fi
+      ;;
+  esac
+}
+
+# Proxy environment for shell mode only. Each value is validated first, then
+# base64-encoded so the remote assignment cannot break out of its quoting.
+# Returns the `env` arguments in $proxy_args.
+build_proxy_args() {
+  proxy_args=""
+  if [ -n "${SANDBOX_HTTP_PROXY:-}" ]; then
+    validate_proxy_url "$SANDBOX_HTTP_PROXY"
+    _proxy_b64=$(encode "$SANDBOX_HTTP_PROXY")
+    for _proxy_name in HTTP_PROXY HTTPS_PROXY ALL_PROXY http_proxy https_proxy all_proxy; do
+      proxy_args="$proxy_args $_proxy_name=\"\$(printf %s '$_proxy_b64' | base64 -d)\""
+    done
+  fi
+  if [ -n "${SANDBOX_NO_PROXY:-}" ]; then
+    case "$SANDBOX_NO_PROXY" in
+      *[!A-Za-z0-9._,*/:-]*)
+        echo "sandbox-exec: SANDBOX_NO_PROXY may only contain host patterns, commas, dots, stars, slashes and colons" >&2
+        exit 2
+        ;;
+    esac
+    _no_proxy_b64=$(encode "$SANDBOX_NO_PROXY")
+    for _proxy_name in NO_PROXY no_proxy; do
+      proxy_args="$proxy_args $_proxy_name=\"\$(printf %s '$_no_proxy_b64' | base64 -d)\""
+    done
+  fi
+}
+
+case "$mode" in
+  shell)
+    [ "$#" -ge 1 ] || { echo "sandbox-exec: shell requires a command" >&2; exit 2; }
+    # A PTY (ssh -tt) is what makes a client timeout actually stop the remote
+    # work: when the connection dies the kernel hangs up the PTY and signals
+    # the command's process group, whereas a plain sshd session leaves its
+    # children running. `stty raw -echo` keeps the PTY from rewriting output
+    # bytes (ONLCR) or echoing stdin, and TERM=dumb/NO_COLOR stop tools from
+    # colourising output for a terminal that is not a human.
+    #
+    # The script is handed to bash as argv (-c), not on stdin: a command inside
+    # it that reads stdin would otherwise consume the rest of the script. The
+    # command's stdin is /dev/null, which is what the Bash tool provides anyway
+    # (it has no stdin input), so `cat` sees EOF instead of blocking on the PTY.
+    #
+    # SANDBOX_HTTP_PROXY/SANDBOX_NO_PROXY are parsed here and not before: a typo
+    # in them must not break read/write file transfers.
+    build_proxy_args
+    remote="stty raw -echo 2>/dev/null; exec env TERM=dumb NO_COLOR=1 CLICOLOR=0 GIT_PAGER=cat PAGER=cat$proxy_args bash -c \"\$(printf %s '$(encode "$1")' | base64 -d)\" < /dev/null"
+    tty_flag=-tt
+    ;;
+  read|write)
+    [ "$#" -ge 1 ] || { echo "sandbox-exec: $mode requires a path" >&2; exit 2; }
+    # No PTY here: file contents must stay byte-exact (a PTY would translate
+    # CR/LF on both directions).
+    remote="sandbox-fs $mode '$(encode "$1")'"
+    tty_flag=-T
+    ;;
+  *)
+    echo "sandbox-exec: unknown mode '$mode'" >&2
+    exit 2
+    ;;
+esac
+
+exec ssh $tty_flag -p "$port" -i "$key" \
+  -F /dev/null \
+  -o IdentitiesOnly=yes \
+  -o BatchMode=yes \
+  -o ForwardAgent=no \
+  -o PasswordAuthentication=no \
+  -o StrictHostKeyChecking=yes \
+  -o UserKnownHostsFile="$known_hosts" \
+  -o ControlMaster=no \
+  -o ControlPath=none \
+  -o ClearAllForwardings=yes \
+  -o ConnectTimeout=10 \
+  -o ServerAliveInterval=15 \
+  -o ServerAliveCountMax=3 \
+  -o LogLevel=ERROR \
+  -- "$user@$host" "$remote"

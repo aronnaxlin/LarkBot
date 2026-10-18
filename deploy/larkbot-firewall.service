@@ -1,0 +1,29 @@
+[Unit]
+Description=LarkBot sandbox egress firewall (iptables DOCKER-USER + INPUT)
+Documentation=https://github.com/aronnaxlin/LarkBot/blob/main/docs/deploy.md
+# Apply the rules before the Docker daemon starts, so the sandbox normally
+# never comes up unfiltered. DOCKER-USER is created by the script if it does
+# not exist yet; Docker reuses an existing chain. Not RequiredBy docker: a
+# failure here must not stop unrelated containers. Instead the check timer
+# (larkbot-firewall-check) stops the sandbox while the rules are missing.
+Before=docker.service
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+# SUBNET, DNS_RESOLVERS, BYPASS_TUN and BYPASS_TUN_PREF can be set here:
+#   sudo install -m 0644 deploy/larkbot-firewall.env.example /etc/default/larkbot-firewall
+EnvironmentFile=-/etc/default/larkbot-firewall
+# Install with: sudo install -m 0755 deploy/firewall.sh /usr/local/sbin/larkbot-firewall
+ExecStart=/usr/local/sbin/larkbot-firewall
+# Re-apply + verify when the operator asks for it, e.g. after a Docker backend
+# change or after editing /etc/default/larkbot-firewall.
+ExecReload=/usr/local/sbin/larkbot-firewall
+# Verify what was just applied; fails the unit (and stays visible in
+# `systemctl status larkbot-firewall`) if a rule is missing.
+ExecStartPost=/usr/local/sbin/larkbot-firewall --check
+# Rules are intentionally not removed on stop: an unguarded sandbox window is
+# worse than leftover rules. Use `larkbot-firewall --remove` explicitly.
+
+[Install]
+WantedBy=multi-user.target

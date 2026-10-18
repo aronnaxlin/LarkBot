@@ -53,9 +53,21 @@ database:
   path: "./data/cahciua.db"
 
 runtime:
+  # Where the Bash tool executes. These defaults run shell commands in the bot
+  # process itself and read/write files on its filesystem — no isolation — so
+  # enable `tools.bash` only when you accept that (see the Security section in
+  # AGENTS.md).
   shell: ["/bin/bash", "-c"]
   writeFile: ["/bin/bash", "-c", "/usr/bin/cat > \"$0\""]
   readFile: ["/usr/bin/cat"]
+  # Docker deployment (docs/deploy.md): run all three inside the sandbox
+  # container instead, so the Bash tool, download_file and read_image paths are
+  # confined to /home/sandbox/work and never touch /app. Uncomment together.
+  # The wrapper is installed in the bot image from deploy/sandbox-exec and
+  # talks to the sandbox over SSH (host/port/key overridable via env).
+  # shell: ["/usr/local/bin/sandbox-exec", "shell"]
+  # writeFile: ["/usr/local/bin/sandbox-exec", "write"]
+  # readFile: ["/usr/local/bin/sandbox-exec", "read"]
   writeFileSizeLimit: 20971520
   readFileSizeLimit: 20971520
 
@@ -138,6 +150,11 @@ chats:
       # Enable per chat only; moderation policy belongs in that chat's systemFiles.
       banSpammer: false
       bash:
+        # Whether the Bash tool is offered to this chat. It is only isolated
+        # when runtime.shell/readFile/writeFile point at the sandbox container
+        # (docs/deploy.md); with the defaults in this file it runs with the
+        # bot's own filesystem access, so keep it off against real group input.
+        # enabled: false
         # Shell tools (`bash`, `kill_task`, `read_task_output`) are exposed only
         # when a trusted maintainer spoke since the bot's last action.
         requireMaintainer: true

@@ -1,6 +1,7 @@
 import type { Logger } from '@guiiai/logg';
 
-import { composeContext, composeProbeContext, injectLateBindingPrompt, latestExternalEventMs, wasToolLoopInterrupted } from './context';
+import { composeContext, composeProbeContext, injectLateBindingPrompt, lastActedAtMs, latestExternalEventMs, wasToolLoopInterrupted } from './context';
+import type { ProbeWindowState } from './context';
 import { computeParticipationStats } from './participation-stats';
 import type { DriverPlatform } from './platform';
 import { renderLateBindingPrompt, renderSystemPrompt } from './prompt';
@@ -62,6 +63,9 @@ export const executeWakeup = async (params: {
   getLastProcessedMs: () => number;
   setLastProcessedMs: (value: number) => void;
   turnBudget?: TurnBudget;
+  // Per-chat probe window start, carried across wake-ups so the probe prefix
+  // stays stable between hysteresis jumps. Mutated in place by the probe call.
+  probeWindow?: ProbeWindowState;
   // Set when retrying this context after primary failed transiently: probe
   // already activated it, so judging again would only add latency.
   probeActivation?: ProbeActivation;
@@ -76,6 +80,7 @@ export const executeWakeup = async (params: {
     params.chatConfig.compaction.maxContextEstTokens,
     params.chatConfig.primary.model.model,
     params.summary,
+    params.chatConfig.primary.reasoningReplayTurns,
   );
   if (!primaryContext) {
     if (wasToolLoopInterrupted(turnResponses)) throw new Error('Cannot compose context for an open tool continuation');
@@ -107,13 +112,31 @@ export const executeWakeup = async (params: {
       chatId: params.chatId,
       lastProcessedMs: params.getLastProcessedMs(),
     }).log('Running probe');
+    // Mandatory probe region: everything since the bot's last real action, not
+    // since the last processed watermark. A no_action or fail-closed probe
+    // advances the watermark, and starting there could hide an earlier
+    // unanswered address or a late-delivered event from every later probe.
+    const lastActedMs = lastActedAtMs(params.contextAtStart, turnResponses);
     const probeContext = composeProbeContext(
       params.contextAtStart,
       turnResponses,
-      params.chatConfig.compaction.maxContextEstTokens,
+      params.chatConfig.probe.contextEstTokens,
       params.summary,
+      {
+        lastActedMs,
+        previousStartMs: params.probeWindow?.startMs ?? null,
+        summaryMaxEstTokens: params.chatConfig.probe.summaryMaxEstTokens,
+      },
     );
     if (!probeContext) return;
+    if (params.probeWindow) params.probeWindow.startMs = probeContext.windowStartMs;
+    if (probeContext.overCap)
+      params.log.withFields({
+        chatId: params.chatId,
+        lastActedMs,
+        omittedMessages: probeContext.omittedCount,
+        omittedEstTokens: probeContext.omittedEstTokens,
+      }).warn('Probe window over budget: oldest unprocessed context omitted');
 
     const system = await renderSystemPrompt({
       mode: 'probe',

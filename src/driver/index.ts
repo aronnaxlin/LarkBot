@@ -3,6 +3,7 @@ import { signal } from 'alien-signals';
 
 import { createCompactionController } from './compaction-controller';
 import { wasToolLoopInterrupted } from './context';
+import type { ProbeWindowState } from './context';
 import type { DriverPlatform } from './platform';
 import { createPrimaryTools } from './primary-tools';
 import { createRunner } from './runner';
@@ -83,6 +84,8 @@ export const createDriver = (config: DriverConfig, deps: DriverPlatform & {
     const compactionMeta = signal<CompactionSessionMeta | null>(
       deps.loadCompaction(chatId),
     );
+    // Probe window start persists across wake-ups for prefix-cache stability.
+    const probeWindow: ProbeWindowState = { startMs: null };
 
     const compaction = createCompactionController({
       chatId,
@@ -157,6 +160,7 @@ export const createDriver = (config: DriverConfig, deps: DriverPlatform & {
             setLastProcessedMs: lastProcessedMs,
             probeActivation,
             onProbeActivated: activation => { probeActivation = activation; },
+            probeWindow,
             log,
           });
           return { kind: 'done' };

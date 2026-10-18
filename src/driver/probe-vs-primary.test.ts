@@ -27,6 +27,7 @@ const makeChatConfig = (): ResolvedChatConfig => ({
   primary: {
     model: { apiBaseUrl: 'mock', apiKey: 'k', model: 'mock-primary', apiFormat: 'openai-chat' },
     turnBudget: DEFAULT_TURN_BUDGET,
+    reasoningReplayTurns: 3,
   },
   systemFiles: [],
   sendTypingAction: false,
@@ -36,6 +37,8 @@ const makeChatConfig = (): ResolvedChatConfig => ({
   probe: {
     model: { apiBaseUrl: 'mock', apiKey: 'k', model: 'mock-probe', apiFormat: 'openai-chat' },
     timeoutMs: DEFAULT_PROBE_TIMEOUT_MS,
+    contextEstTokens: 20000,
+    summaryMaxEstTokens: 20000,
   },
   imageToText: { enabled: false, maxConcurrency: 1 },
   animationToText: { enabled: false, maxFrames: 0, maxConcurrency: 1 },
@@ -590,6 +593,145 @@ describe('probe vs primary view of bot\'s own messages', () => {
     expect(quietProbeText).not.toContain("The chatbot's recent activity");
     expect(quietPrimaryText).not.toContain('Your recent activity');
     expect(quietPrimaryText).not.toContain('Bot-to-bot activity');
+
+    driver.stop();
+  });
+
+  it('probe sees only its recent window while primary still sees the full history', async () => {
+    mockCallLlm.mockReset();
+    mockCallLlm.mockImplementation(async config => ({
+      entries: [{
+        kind: 'message', role: 'assistant', reasoning: undefined,
+        parts: [config.model === 'mock-probe'
+          ? { kind: 'toolCall', callId: 'p1', name: 'decide', args: JSON.stringify({ should_act: 'send_message', reason: 'addressed' }) }
+          : { kind: 'toolCall', callId: 'pr1', name: 'end_turn', args: '{}' }],
+      }],
+      usage: { inputTokens: 10, outputTokens: 5, cacheReadTokens: 0, cacheWriteTokens: 0 },
+    }));
+
+    const chatConfig = makeChatConfig();
+    chatConfig.probe.contextEstTokens = 1000; // target ≈ 500 estimated tokens
+    const h = makeReactOnlyHarness();
+    const driver = createDriver({ chatIds: ['-100127'], resolveChatConfig: () => chatConfig }, h.deps);
+
+    // Six ~510-token segments: only the newest fits the probe window.
+    const rc: RenderedContext = Array.from({ length: 6 }, (_, i) => ({
+      receivedAtMs: (i + 1) * 1000,
+      senderId: 'user1',
+      content: [{ type: 'text', text: `<message id="${i}" sender="Alice" t="t">history ${i} ${'x'.repeat(1000)}</message>` }],
+    }));
+    driver.handleEvent('-100127', rc);
+    await vi.waitFor(() => expect(h.persistedTRs).toHaveLength(1), { timeout: 1000, interval: 10 });
+
+    const probeText = collectUserText(mockCallLlm.mock.calls[0]![1]);
+    const primaryText = collectUserText(mockCallLlm.mock.calls[1]![1]);
+    expect(probeText).not.toContain('history 0');
+    expect(probeText).toContain('history 5');
+    expect(primaryText).toContain('history 0');
+    expect(primaryText).toContain('history 5');
+
+    driver.stop();
+  });
+
+  it('keeps an unanswered @-mention after a no_action probe and later chatter', async () => {
+    mockCallLlm.mockReset();
+    let probeCalls = 0;
+    mockCallLlm.mockImplementation(async config => {
+      if (config.model === 'mock-probe') {
+        probeCalls++;
+        return {
+          entries: [{
+            kind: 'message', role: 'assistant', reasoning: undefined,
+            parts: [{
+              kind: 'toolCall', callId: `p${probeCalls}`, name: 'decide',
+              args: JSON.stringify(probeCalls === 1
+                ? { should_act: 'no_action', reason: 'nothing to add yet' }
+                : { should_act: 'send_message', reason: 'addressed' }),
+            }],
+          }],
+          usage: { inputTokens: 10, outputTokens: 5, cacheReadTokens: 0, cacheWriteTokens: 0 },
+        };
+      }
+      return {
+        entries: [{
+          kind: 'message', role: 'assistant', reasoning: undefined,
+          parts: [{ kind: 'toolCall', callId: 'pr1', name: 'end_turn', args: '{}' }],
+        }],
+        usage: { inputTokens: 20, outputTokens: 10, cacheReadTokens: 0, cacheWriteTokens: 0 },
+      };
+    });
+
+    const h = makeReactOnlyHarness();
+    const driver = createDriver({ chatIds: ['-100128'], resolveChatConfig: () => makeChatConfig() }, h.deps);
+
+    const mention: RenderedContext = [{
+      receivedAtMs: Date.now(),
+      senderId: 'user1',
+      content: [{ type: 'text', text: '<message id="m1" sender="Alice" t="t">@LarkBot please answer me</message>' }],
+    }];
+    driver.handleEvent('-100128', mention);
+    await vi.waitFor(() => expect(h.persistedProbes).toHaveLength(1), { timeout: 1000, interval: 10 });
+    expect(h.persistedProbes[0]!.isActivated).toBe(false);
+
+    // Chatter after the no_action probe pushes past the window target, but the
+    // @-mention must stay in the mandatory region because the bot has not acted.
+    const base = Date.now();
+    const chatter: RenderedContext = Array.from({ length: 12 }, (_, i) => ({
+      receivedAtMs: base + (i + 1) * 1000,
+      senderId: 'user2',
+      content: [{ type: 'text', text: `<message id="c${i}" sender="Bob" t="t">${'x'.repeat(2000)}</message>` }],
+    }));
+    driver.handleEvent('-100128', [...mention, ...chatter]);
+    await vi.waitFor(() => expect(h.persistedTRs).toHaveLength(1), { timeout: 1000, interval: 10 });
+
+    const probeCallList = mockCallLlm.mock.calls.filter(c => c[0]!.model === 'mock-probe');
+    expect(probeCallList).toHaveLength(2);
+    const secondProbeText = collectUserText(probeCallList[1]![1]);
+    expect(secondProbeText).toContain('@LarkBot please answer me');
+
+    driver.stop();
+  });
+
+  it('keeps an unanswered @-mention after a silent end_turn and later chatter', async () => {
+    mockCallLlm.mockReset();
+    mockCallLlm.mockImplementation(async config => ({
+      entries: [{
+        kind: 'message', role: 'assistant', reasoning: undefined,
+        parts: [config.model === 'mock-probe'
+          ? { kind: 'toolCall', callId: 'p1', name: 'decide', args: JSON.stringify({ should_act: 'send_message', reason: 'addressed' }) }
+          : { kind: 'toolCall', callId: 'pr1', name: 'end_turn', args: '{}' }],
+      }],
+      usage: { inputTokens: 20, outputTokens: 10, cacheReadTokens: 0, cacheWriteTokens: 0 },
+    }));
+
+    const h = makeReactOnlyHarness();
+    const driver = createDriver({ chatIds: ['-100129'], resolveChatConfig: () => makeChatConfig() }, h.deps);
+
+    const mention: RenderedContext = [{
+      receivedAtMs: Date.now(),
+      senderId: 'user1',
+      content: [{ type: 'text', text: '<message id="m1" sender="Alice" t="t">@LarkBot please answer me</message>' }],
+    }];
+    driver.handleEvent('-100129', mention);
+    await vi.waitFor(() => expect(h.persistedTRs).toHaveLength(1), { timeout: 1000, interval: 10 });
+    // The primary turn ended silently: its end_turn-only TR must not count as an action.
+    expect(h.persistedTRs[0]!.entries.some(entry =>
+      entry.kind === 'message' && entry.role === 'assistant'
+      && entry.parts.some(part => part.kind === 'toolCall' && part.name === 'end_turn'))).toBe(true);
+
+    const base = Date.now();
+    const chatter: RenderedContext = Array.from({ length: 12 }, (_, i) => ({
+      receivedAtMs: base + (i + 1) * 1000,
+      senderId: 'user2',
+      content: [{ type: 'text', text: `<message id="c${i}" sender="Bob" t="t">${'x'.repeat(2000)}</message>` }],
+    }));
+    driver.handleEvent('-100129', [...mention, ...chatter]);
+    await vi.waitFor(() => expect(h.persistedTRs).toHaveLength(2), { timeout: 1000, interval: 10 });
+
+    const probeCallList = mockCallLlm.mock.calls.filter(c => c[0]!.model === 'mock-probe');
+    expect(probeCallList).toHaveLength(2);
+    const secondProbeText = collectUserText(probeCallList[1]![1]);
+    expect(secondProbeText).toContain('@LarkBot please answer me');
 
     driver.stop();
   });

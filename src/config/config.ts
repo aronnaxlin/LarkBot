@@ -51,10 +51,22 @@ const TurnBudgetOverrideSchema = v.partial(v.object({
 // 2 min a stuck probe would hold the chat's serialized scheduler too long.
 const ProbeTimeoutMsSchema = v.pipe(v.number(), v.integer(), v.minValue(1_000), v.maxValue(120_000));
 
+// Estimated-token budget of the probe's recent slice. Below 1K the judge cannot
+// see enough of the conversation to decide reliably.
+const ProbeContextEstTokensSchema = v.pipe(v.number(), v.integer(), v.minValue(1_000));
+
+// Separate cap for the always-included compaction summary in the probe request,
+// truncated from the end above it. Below 1K the summary is useless as context.
+const ProbeSummaryMaxEstTokensSchema = v.pipe(v.number(), v.integer(), v.minValue(1_000));
+
+// Number of newest turn responses whose provider reasoning is replayed.
+const ReasoningReplayTurnsSchema = v.pipe(v.number(), v.integer(), v.minValue(0));
+
 const ChatConfigSchema = v.object({
   primary: v.optional(v.object({
     model: v.optional(v.string(), 'primary'),
     turnBudget: v.optional(TurnBudgetOverrideSchema, {}),
+    reasoningReplayTurns: v.optional(ReasoningReplayTurnsSchema, 3),
   }), {}),
   systemFiles: v.optional(v.array(v.string()), []),
   sendTypingAction: v.optional(v.boolean(), true),
@@ -72,6 +84,8 @@ const ChatConfigSchema = v.object({
   probe: v.optional(v.object({
     model: v.optional(v.string()),
     timeoutMs: v.optional(ProbeTimeoutMsSchema, DEFAULT_PROBE_TIMEOUT_MS),
+    contextEstTokens: v.optional(ProbeContextEstTokensSchema, 20000),
+    summaryMaxEstTokens: v.optional(ProbeSummaryMaxEstTokensSchema, 20000),
   }), {}),
   imageToText: v.optional(v.object({
     enabled: v.optional(v.boolean(), false),
@@ -116,6 +130,7 @@ const ChatOverrideSchema = v.optional(v.partial(v.object({
   primary: v.partial(v.object({
     model: v.pipe(v.string(), v.minLength(1)),
     turnBudget: TurnBudgetOverrideSchema,
+    reasoningReplayTurns: ReasoningReplayTurnsSchema,
   })),
   systemFiles: v.array(v.string()),
   sendTypingAction: v.boolean(),
@@ -133,6 +148,8 @@ const ChatOverrideSchema = v.optional(v.partial(v.object({
   probe: v.partial(v.object({
     model: v.pipe(v.string(), v.minLength(1)),
     timeoutMs: ProbeTimeoutMsSchema,
+    contextEstTokens: ProbeContextEstTokensSchema,
+    summaryMaxEstTokens: ProbeSummaryMaxEstTokensSchema,
   })),
   imageToText: v.partial(v.object({
     enabled: v.boolean(),
@@ -224,13 +241,13 @@ export type RuntimeConfig = Config['runtime'];
 export type BackgroundTasksConfig = Config['backgroundTasks'];
 
 export interface ResolvedChatConfig {
-  primary: { model: LlmEndpoint; turnBudget: TurnBudget };
+  primary: { model: LlmEndpoint; turnBudget: TurnBudget; reasoningReplayTurns: number };
   systemFiles: { filename: string; content: string }[];
   sendTypingAction: boolean;
   blockedUserIds: string[];
   debounce: DebounceConfig;
   compaction: CompactionConfig;
-  probe: { model: LlmEndpoint; timeoutMs: number };
+  probe: { model: LlmEndpoint; timeoutMs: number; contextEstTokens: number; summaryMaxEstTokens: number };
   imageToText: { enabled: boolean; model?: string; maxConcurrency: number };
   animationToText: { enabled: boolean; model?: string; maxFrames: number; maxConcurrency: number };
   customEmojiToText: { enabled: boolean; model?: string; maxFrames: number; maxConcurrency: number };
@@ -334,7 +351,11 @@ export const resolveChatConfig = (config: Config, chatId: string): ResolvedChatC
   }
 
   return {
-    primary: { model: primaryModel, turnBudget: resolveTurnBudget(chatId, merged) },
+    primary: {
+      model: primaryModel,
+      turnBudget: resolveTurnBudget(chatId, merged),
+      reasoningReplayTurns: merged.primary.reasoningReplayTurns,
+    },
     systemFiles: merged.systemFiles.map(path => ({
       filename: basename(path),
       content: readFileSync(path, 'utf-8').trim(),
@@ -349,6 +370,8 @@ export const resolveChatConfig = (config: Config, chatId: string): ResolvedChatC
     probe: {
       model: merged.probe.model ? resolveModel(config, merged.probe.model) : primaryModel,
       timeoutMs: merged.probe.timeoutMs,
+      contextEstTokens: merged.probe.contextEstTokens,
+      summaryMaxEstTokens: merged.probe.summaryMaxEstTokens,
     },
     imageToText: {
       enabled: merged.imageToText.enabled,

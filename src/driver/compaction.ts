@@ -18,11 +18,18 @@ export interface CompactionParams extends Omit<LlmCallConfig, 'forceToolChoice'>
   existingSummary?: string;
   oldCursorMs: number;
   newCursorMs: number;
+  /** Chat's compaction trigger threshold; the input cap adds headroom above it. */
+  maxContextEstTokens: number;
+  reasoningReplayTurns: number;
   maxImagesAllowed?: number;
   log: Logger;
 }
 
-const COMPACT_MAX_TOKENS = 200000;
+// Headroom above the trigger threshold for the compaction system prompt, user
+// instruction and provider framing. The existing summary is subtracted from
+// this cap (protected from trimming, not outside it), so the raw window budget
+// is cap minus summary tokens.
+export const COMPACTION_INPUT_HEADROOM_TOKENS = 20_000;
 const MAX_RETRIES = 3;
 
 const extractAssistantText = (entries: ConversationEntry[]): string => {
@@ -44,8 +51,9 @@ export const runCompaction = async (params: CompactionParams): Promise<Compactio
   ]);
 
   const ctx = composeContext(
-    params.rcWindow, params.trsWindow, COMPACT_MAX_TOKENS,
-    params.model, params.existingSummary,
+    params.rcWindow, params.trsWindow,
+    params.maxContextEstTokens + COMPACTION_INPUT_HEADROOM_TOKENS,
+    params.model, params.existingSummary, params.reasoningReplayTurns,
   );
   if (!ctx) throw new Error('compaction window is empty');
 

@@ -78,4 +78,23 @@ describe('platform configuration', () => {
     expect(() => fixture({ platform: 'feishu' }, { 'oc_synthetic': { tools: { banSpammer: true } } }))
       .toThrow('tools.banSpammer is not supported');
   });
+
+  it('defaults and validates the probe context budget, summary cap and reasoning replay limit', () => {
+    const config = fixture({ platform: 'feishu' }, {
+      oc_synthetic: {},
+      oc_custom: { probe: { contextEstTokens: 5000, summaryMaxEstTokens: 4000 }, primary: { reasoningReplayTurns: 0 } },
+    });
+    expect(resolveChatConfig(config, 'oc_synthetic').probe.contextEstTokens).toBe(20000);
+    expect(resolveChatConfig(config, 'oc_synthetic').probe.summaryMaxEstTokens).toBe(20000);
+    expect(resolveChatConfig(config, 'oc_synthetic').primary.reasoningReplayTurns).toBe(3);
+    expect(resolveChatConfig(config, 'oc_custom').probe.contextEstTokens).toBe(5000);
+    expect(resolveChatConfig(config, 'oc_custom').probe.summaryMaxEstTokens).toBe(4000);
+    expect(resolveChatConfig(config, 'oc_custom').primary.reasoningReplayTurns).toBe(0);
+    for (const contextEstTokens of [0, 999, 1500.5])
+      expect(() => fixture({ platform: 'feishu' }, { oc_synthetic: { probe: { contextEstTokens } } })).toThrow();
+    for (const summaryMaxEstTokens of [0, 999, 1500.5])
+      expect(() => fixture({ platform: 'feishu' }, { oc_synthetic: { probe: { summaryMaxEstTokens } } })).toThrow();
+    for (const reasoningReplayTurns of [-1, 1.5])
+      expect(() => fixture({ platform: 'feishu' }, { oc_synthetic: { primary: { reasoningReplayTurns } } })).toThrow();
+  });
 });

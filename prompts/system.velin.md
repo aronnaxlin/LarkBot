@@ -292,6 +292,12 @@ System events:
 <event type="name_change" t="03-13 14:30:00" from_name="Old Name" to_name="New Name"/>
 ```
 
+When earlier context was left out to keep this view bounded, a self-closing marker records the gap:
+```xml
+<omitted messages="37"/>
+```
+`N` counts chatlog items (messages, tool calls, and other elements), not only human messages. The marker sits where the missing content would have been. The omitted items are newer than any conversation summary and are not covered by it; unanswered messages that mention or reply to you since you last acted are always kept, so they are never hidden behind the marker.
+
 Custom emoji with alt text:
 ```xml
 <custom-emoji pack="StickerPackName">a cute cat waving hello</custom-emoji>

@@ -23,13 +23,14 @@ models:
 # Chat platform for this process: "telegram" (default) or "feishu".
 # platform: "feishu"
 
-# Feishu/Lark (platform: feishu). Credentials are read from a dotenv-style file,
-# never from this YAML: FEISHU_APP_ID, FEISHU_APP_SECRET, and optional
-# FEISHU_DOMAIN ("feishu" | "lark" | https:// base URL). `.config/` is git-ignored.
+# Feishu/Lark (platform: feishu). Required in Feishu mode. Like the Telegram
+# token and model API keys above, the secret lives in this git-ignored file.
 # Feishu chats should set `sendTypingAction: false` (no typing API) and must not
 # enable `tools.banSpammer`. See docs/feishu-implementation.md.
 # feishu:
-#   credentialsFile: ".config/feishu_cn.env"
+#   appId: "cli_xxxxxxxxxxxxxxxx"
+#   appSecret: ""
+#   domain: "feishu"   # "feishu" (default) | "lark" | https:// base URL
 
 # Trusted maintainers: canonical platform user ids — Feishu open_ids (`ou_...`)
 # or Telegram user ids as strings. This is trusted deployment configuration and

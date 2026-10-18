@@ -242,6 +242,8 @@ Code handles only the current data shape. Existing data changes require a new Dr
 
 Conventional Commits. Keep changes focused and update architectural docs in the same commit. **Never commit or push without explicit human instruction.**
 
+Single-thread mode (one agent working directly with the maintainer, no parallel delegated branches): once a commit is authorized, push it straight to `main`; do not open a pull request against your own work. Delegated or parallel work still lands through its own branch and a reviewed pull request.
+
 ### Commit Identity
 
 - For original work, use the human contributor's configured Git `user.name` and `user.email`, unless the user explicitly specifies another identity.

@@ -1,0 +1,53 @@
+# SSH daemon for the LarkBot sandbox container.
+#
+# One key, one user, no forwarding, no root, no PAM. Port 2222 (not 22) so
+# sshd can bind it without CAP_NET_BIND_SERVICE, which cap_drop [ALL] removes.
+# The host key lives in a volume because the bot pins it in known_hosts; see
+# deploy/sandbox/entrypoint.sh and docs/deploy.md.
+
+Port 2222
+ListenAddress 0.0.0.0
+HostKey /etc/ssh/host_keys/ssh_host_ed25519_key
+PidFile /run/sshd/sshd.pid
+
+# The mounted file is /etc/ssh/authorized_keys/sandbox, owned by root (StrictModes).
+AuthorizedKeysFile /etc/ssh/authorized_keys/%u
+AllowUsers sandbox
+
+PermitRootLogin no
+PubkeyAuthentication yes
+PasswordAuthentication no
+PermitEmptyPasswords no
+KbdInteractiveAuthentication no
+AuthenticationMethods publickey
+UsePAM no
+MaxAuthTries 3
+LoginGraceTime 20
+UseDNS no
+
+# sandbox-exec's shell mode requests a PTY: that is what makes the kernel hang
+# up a timed-out command's process group when the bot's SSH connection dies.
+# (read/write mode stays PTY-less so file bytes are never CR/LF translated.)
+PermitTTY yes
+
+# No tunnel of any kind (covers TCP, agent and authentication forwarding,
+# stream-local forwarding, X11 and tunnel devices).
+DisableForwarding yes
+GatewayPorts no
+
+# Reap sessions whose client vanished: the sandbox-exec shell mode always holds
+# the PTY (so a hangup kills the command group), but a stuck SSH client must
+# not pin a process slot either.
+ClientAliveInterval 15
+ClientAliveCountMax 3
+
+# No client-supplied environment (no AcceptEnv, so sshd's default empty set
+# applies), no rc files, no login banners; and no sftp subsystem, so scp/sftp
+# cannot be used for bulk transport either.
+PermitUserEnvironment no
+PermitUserRC no
+PrintMotd no
+PrintLastLog no
+
+# Logs to stderr (sshd -e) so `docker compose logs sandbox` shows logins.
+LogLevel VERBOSE

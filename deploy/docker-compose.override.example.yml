@@ -1,0 +1,63 @@
+# Optional compose override: keep the bot's SQLite database and the sandbox
+# workspace on a specific filesystem (a dedicated data disk, or a size-limited
+# ext4 image) instead of Docker named volumes.
+#
+# This is also the place to turn on the "existing database only" guard for a
+# migrated deployment: the entrypoint then fails with a clear message instead
+# of quietly creating an empty DB in the new location, so remove the comment
+# on `LARKBOT_REQUIRE_EXISTING_DB` for the first start and keep it afterwards.
+#
+#   cd deploy
+#   cp docker-compose.override.example.yml docker-compose.override.yml
+#   cp .env.example .env            # then set COMPOSE_FILE as described there
+#   # edit the two paths below, then:
+#   sudo mkdir -p /srv/larkbot/data /srv/larkbot/sandbox-work
+#   sudo chown 1000:1000 /srv/larkbot/data /srv/larkbot/sandbox-work
+#   sudo docker compose up -d
+#
+# `create_host_path: false` makes compose fail loudly when a path is missing
+# instead of silently creating a root-owned empty directory (which would then
+# be inaccessible to the container's uid 1000).
+#
+# Point these at a SUBDIRECTORY that exists only on the target filesystem, not
+# at its mount point: with the bind at the mount root, a mount failure would
+# silently fall back to the host's root filesystem. Both directories should
+# live on an ext4-like local filesystem: SQLite WAL needs working locking and
+# mmap, and network filesystems (NFS/SMB) are not supported. See docs/deploy.md.
+
+services:
+  larkbot:
+    # -- optional bot environment -------------------------------------------
+    # Refuse to start when the database file is missing (see the note above).
+    # SANDBOX_HTTP_PROXY points the Bash tool at a filtering proxy the firewall
+    # allows via ALLOW_PROXY (docs/deploy.md 3.8, Option B); readFile/writeFile
+    # are unaffected. SANDBOX_NO_PROXY is its NO_PROXY list.
+    # environment:
+    #   LARKBOT_REQUIRE_EXISTING_DB: "1"
+    #   SANDBOX_HTTP_PROXY: "http://172.31.250.1:3128"
+    #   SANDBOX_NO_PROXY: "localhost,127.0.0.1,.internal"
+    volumes:
+      # SQLite DB and background-task output.
+      - type: bind
+        source: /srv/larkbot/data
+        target: /app/data
+        bind:
+          create_host_path: false
+
+  sandbox:
+    # -- optional DNS override ----------------------------------------------
+    # The public resolvers in docker-compose.yml are the generic default. On a
+    # host where they are unreliable (mainland China, for example) point the
+    # sandbox at a reachable public resolver instead; keep
+    # /etc/default/larkbot-firewall DNS_RESOLVERS in sync, because port 53 is
+    # only allowed to those addresses.
+    # dns:
+    #   - 223.5.5.5
+    volumes:
+      # The Bash tool's workspace. Give it its own filesystem (or a
+      # size-limited ext4 image) so it cannot fill the disk holding the DB.
+      - type: bind
+        source: /srv/larkbot/sandbox-work
+        target: /home/sandbox/work
+        bind:
+          create_host_path: false

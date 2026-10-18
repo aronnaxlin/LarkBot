@@ -158,3 +158,10 @@ vendor/
 # whichever libtdjson is currently active (vendor build or prebuilt-tdlib),
 # so committing the file would couple the repo to one specific TDLib commit.
 types/
+
+# Docker deployment: private paths, keys and per-host compose overrides.
+deploy/.env
+deploy/docker-compose.override.yml
+deploy/secrets/
+deploy/known_hosts
+deploy/sandbox_authorized_keys

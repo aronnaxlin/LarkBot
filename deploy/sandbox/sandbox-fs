@@ -1,0 +1,49 @@
+#!/bin/sh
+# sandbox-fs read|write <base64-path>
+#
+# File access for the bot's runtime.readFile / runtime.writeFile, confined to
+# the sandbox work directory. The path is base64-encoded by deploy/sandbox-exec
+# so spaces, quotes, newlines and unicode survive the SSH command string without
+# any shell quoting on either side.
+#
+# stdin/stdout are the file contents: `read` streams the target to stdout,
+# `write` consumes stdin. Diagnostics go to stderr; the exit status is the
+# program's.
+
+set -eu
+
+base=/home/sandbox/work
+mode=${1:-}
+
+case "$mode" in
+  read|write) ;;
+  *) echo "sandbox-fs: usage: sandbox-fs read|write <base64-path>" >&2; exit 2 ;;
+esac
+
+[ "$#" -ge 2 ] || { echo "sandbox-fs: missing path" >&2; exit 2; }
+path=$(printf '%s' "$2" | base64 -d) || { echo "sandbox-fs: invalid base64 path" >&2; exit 2; }
+[ -n "$path" ] || { echo "sandbox-fs: empty path" >&2; exit 2; }
+
+case "$path" in
+  /*) target=$path ;;
+  *)  target=$base/$path ;;
+esac
+
+# -m canonicalizes without requiring the file to exist and resolves symlinks in
+# existing components, so `../../etc/passwd` and a symlink out of the work
+# directory are both rejected.
+target=$(realpath -m -- "$target")
+case "$target" in
+  "$base"|"$base"/*) ;;
+  *) echo "sandbox-fs: path escapes $base: $path" >&2; exit 2 ;;
+esac
+
+case "$mode" in
+  read)
+    exec cat -- "$target"
+    ;;
+  write)
+    mkdir -p -- "$(dirname -- "$target")"
+    exec cat > "$target"
+    ;;
+esac

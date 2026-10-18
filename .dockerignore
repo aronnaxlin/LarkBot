@@ -1,0 +1,40 @@
+# Build context for the bot image. Everything here is either local state, a
+# secret, or generated; none of it may end up in a layer.
+.git
+.github
+.pi
+.claude
+docs
+assets
+node_modules
+dist
+types
+vendor
+.tdlib-build
+
+# Local state and secrets
+data
+config.yaml
+contacts.json
+.config
+.env
+.env.*
+!.env.example
+prompts/IDENTITY.md
+deploy/secrets
+deploy/known_hosts
+deploy/sandbox_authorized_keys
+deploy/.env
+deploy/docker-compose.override.yml
+*.pem
+*.key
+
+# Tests are not part of the runtime image (** also covers nested directories)
+**/*.test.ts
+
+# Noise
+*.log
+*.db
+*.db-shm
+*.db-wal
+.eslintcache

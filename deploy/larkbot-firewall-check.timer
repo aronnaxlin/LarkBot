@@ -1,0 +1,12 @@
+[Unit]
+Description=Run the LarkBot sandbox firewall check every 5 minutes
+Documentation=https://github.com/aronnaxlin/LarkBot/blob/main/docs/deploy.md
+
+[Timer]
+OnBootSec=1min
+OnUnitActiveSec=5min
+# Catch up after a suspend, and do not fire repeatedly while one check runs.
+Persistent=true
+
+[Install]
+WantedBy=timers.target

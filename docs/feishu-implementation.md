@@ -76,7 +76,9 @@
 ```yaml
 platform: feishu
 feishu:
-  credentialsFile: ".config/feishu_cn.env"   # 默认值，可省略
+  appId: "cli_xxxxxxxxxxxxxxxx"   # 必须形如 cli_ + 16 位十六进制
+  appSecret: ""
+  domain: "feishu"                # 可选：feishu（默认）、lark 或 https:// 基础 URL
 chats:
   default:
     sendTypingAction: false   # 飞书没有机器人“正在输入”API；保持 true 也只是空操作
@@ -85,9 +87,8 @@ chats:
 ```
 
 - 飞书模式下不需要 `telegram` 段；Telegram 模式（默认）仍然必填。
-- 凭证文件采用 dotenv 格式。程序读取 `FEISHU_APP_ID`（必须形如 `cli_` + 16 位十六进制）、`FEISHU_APP_SECRET`、`FEISHU_DOMAIN`（可选：`feishu`、`lark` 或 `https://` 基础 URL，默认 `feishu`）。`REGION`、`CHAT_ID` 不读取；群 ID 写在 `chats` 里。
-- 凭证值只在内存中使用：不写入 `process.env`（bash 工具的子进程会继承它），出错时只报 key 名或行号，SDK 日志会删掉 `config`、`headers`、`*token*`、`app_secret` 等字段，再替换掉 app secret 本身。
-- `.config/` 已加入 `.gitignore`。
+- 飞书模式下 `feishu` 段必填，凭证和 Telegram token、模型 API key 一样写在 `config.yaml` 里（该文件已被 git 忽略）。群 ID 写在 `chats` 里。
+- 凭证值只在内存中使用：不写入 `process.env`（bash 工具的子进程会继承它），校验报错只说明哪个字段不合法、不回显取值，SDK 日志会删掉 `config`、`headers`、`*token*`、`app_secret` 等字段，再替换掉 app secret 本身。
 
 ## 5. 飞书后台需要的权限与事件
 
@@ -110,7 +111,7 @@ chats:
 - `pnpm build`：通过。
 - `pnpm test:run`：490 个测试中 486 个通过。4 个失败都与本分支无关：3 个 TGS 测试需要原生 lottie-frame；`probe-vs-primary` 中断言 “evaluator's notes” 的那个测试，在本分支未改动的 prompt 和测试文件上同样失败。
 - `pnpm typecheck`：剩 5 个错误。4 个是 §9.2 中两个 Driver 行为测试的类型补丁（不在本线修改范围内）；1 个是已有的 `markdown-it-math-loose` 缺少类型声明。
-- 新增测试：`src/feishu/{credentials,content,user-names,reactions,ingress}.test.ts`、`src/telegram/driver-platform.test.ts`、`src/config/platform-config.test.ts`、`src/container/feishu-mode.test.ts`。最后一个用合成凭证和 mock 掉的 SDK 构建完整容器，并断言 `tdl.configure` 和 `tdl.createClient` 都没有被调用。
+- 新增测试：`src/feishu/{content,user-names,reactions,ingress}.test.ts`、`src/telegram/driver-platform.test.ts`、`src/config/platform-config.test.ts`、`src/container/feishu-mode.test.ts`。最后一个用合成凭证和 mock 掉的 SDK 构建完整容器，并断言 `tdl.configure` 和 `tdl.createClient` 都没有被调用。
 - 离线确认：node-sdk 1.76.0 的 CJS 命名导出在 Node ESM 和 tsx 下都能通过 `import * as lark` 取到。
 
 2026-10-17 图片接入后重跑（`feat/feishu-images`）：`pnpm typecheck`、`pnpm lint`、`pnpm test:run`（53 files / 527 tests）、`pnpm build` 全部通过。测试覆盖：图片解析、附件能力配对、按 index 下载（含多图 post）、无 `fileKey` 不变式错误、`send_message.attachments` 能力拆分、20 MB 上限与 Content-Length 预检、30 s 超时与流销毁、中途错误的脱敏、registrar 端到端接线（图片事件 → `events.attachments.fileKey` → `getMessageResource` 下载）。`client.im.v1.messageResource.get` 只做了类型检查和模拟 SDK 的单元测试，没有联机验证。
@@ -130,7 +131,7 @@ chats:
 ## 8. 未验证事项与限制
 
 - `src/feishu/sdk.ts` 已通过类型检查，并已在 2026-10-17 联机使用。用到的接口有 `im.v1.message.create/reply`、`im.v1.messageReaction.create/delete`、`contact.v3.user.get`、`Client.request`（`/open-apis/bot/v3/info`）、`WSClient` 和 `EventDispatcher`。
-- 尚未确认 `FEISHU_DOMAIN` 的实际取值格式；值不符合 §4 中的格式时，启动会报错（错误信息不包含值）。
+- 尚未确认 `feishu.domain` 的实际取值格式；值不符合 §4 中的格式时，启动会报错（错误信息不包含值）。
 - 机器人被 @ 时，`mentions[].id.open_id` 是否等于 `/bot/v3/info` 返回的 open_id：已在 2026-10-17 联机确认（@ 提及与 `mentionsMe` 正常）。
 - 收到的 post 中，`at` 元素按文档使用 `@_user_N` 占位符；代码同时兼容直接给出 open_id 的情况。
 - 文本消息里的 `[文本](url)` 链接按纯文本保留，不解析成链接节点。

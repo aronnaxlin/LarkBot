@@ -231,11 +231,24 @@ const ConfigSchema = v.object({
     /** Override the default tdlib state directory for the userbot client (defaults to data/tdlib-userbot). */
     userbotDataDir: v.optional(v.string()),
   })),
-  /** Used when platform is "feishu". Credentials never live in this YAML file. */
+  /** Required when platform is "feishu". Same trust level as the Telegram token and model API keys. */
   feishu: v.optional(v.object({
-    /** Dotenv-style file with FEISHU_APP_ID, FEISHU_APP_SECRET and optional FEISHU_DOMAIN. */
-    credentialsFile: v.optional(v.string(), '.config/feishu_cn.env'),
-  }), {}),
+    // Explicit messages throughout: valibot's defaults embed the received
+    // value, and a mistyped secret must not reach the fatal-error log.
+    // The SDK's WSClient silently refuses to start with a malformed app id.
+    appId: v.pipe(
+      v.string('feishu.appId must be a string'),
+      v.trim(),
+      v.regex(/^cli_[0-9a-fA-F]{16}$/, 'feishu.appId must be a cli_ application id'),
+    ),
+    appSecret: v.pipe(v.string('feishu.appSecret must be a string'), v.trim(), v.minLength(1, 'feishu.appSecret is required')),
+    /** `feishu`, `lark`, or an explicit https:// open-platform base URL. */
+    domain: v.optional(v.pipe(
+      v.string('feishu.domain must be a string'),
+      v.trim(),
+      v.regex(/^(?:feishu|lark|https:\/\/[^\s/]+\/?)$/, 'feishu.domain must be "feishu", "lark", or an https:// base URL'),
+    ), 'feishu'),
+  }, 'feishu must be a mapping')),
   database: v.optional(v.object({
     path: v.optional(v.string(), './data/cahciua.db'),
   }), {}),
@@ -246,6 +259,7 @@ const ConfigSchema = v.object({
 
 export type Config = v.InferOutput<typeof ConfigSchema>;
 export type TelegramConfig = NonNullable<Config['telegram']>;
+export type FeishuConfig = NonNullable<Config['feishu']>;
 export type ChatConfig = v.InferOutput<typeof ChatConfigSchema>;
 
 export type RuntimeConfig = Config['runtime'];
@@ -302,6 +316,8 @@ const validateConfig = (config: Config): void => {
 
   if (config.platform === 'telegram' && !config.telegram)
     throw new Error('Config: the "telegram" section is required when platform is "telegram"');
+  if (config.platform === 'feishu' && !config.feishu)
+    throw new Error('Config: the "feishu" section is required when platform is "feishu"');
   if (config.platform === 'feishu') {
     for (const chatId of getChatIds(config)) {
       const merged = mergeChatConfig(config, chatId);
@@ -315,7 +331,13 @@ const validateConfig = (config: Config): void => {
 export const loadConfig = (): Config => {
   const raw = readFileSync(CONFIG_PATH, 'utf-8');
   const parsed = parseYaml(raw);
-  const config = v.parse(ConfigSchema, parsed);
+  // Rethrow without `issues`: each issue carries its raw `input`, which for a
+  // credential field would be the secret, and the fatal-error logger
+  // serializes the error object.
+  const result = v.safeParse(ConfigSchema, parsed);
+  if (!result.success)
+    throw new Error(`Invalid config: ${result.issues.map(issue => `${v.getDotPath(issue) ?? '(root)'}: ${issue.message}`).join('; ')}`);
+  const config = result.output;
   validateConfig(config);
   return config;
 };
@@ -323,6 +345,11 @@ export const loadConfig = (): Config => {
 export const requireTelegramConfig = (config: Config): TelegramConfig => {
   if (!config.telegram) throw new Error('Telegram configuration is unavailable');
   return config.telegram;
+};
+
+export const requireFeishuConfig = (config: Config): FeishuConfig => {
+  if (!config.feishu) throw new Error('Feishu configuration is unavailable');
+  return config.feishu;
 };
 
 export const resolveModel = (config: Config, name: string): LlmEndpoint => {

@@ -1,3 +1,4 @@
+import { requireFeishuConfig } from '../../config/config';
 import { canonicalMessageExists, hasEventDedupKey, loadEventsByMessageIds, persistDedupedEvent } from '../../db';
 import {
   createFeishuBotIdentity,
@@ -5,7 +6,6 @@ import {
   createFeishuIngress,
   createFeishuSdk,
   createFeishuUserNames,
-  loadFeishuCredentials,
 } from '../../feishu';
 import type { PlatformRuntime } from '../../startup/platform';
 import type { Registrar } from '../registrar';
@@ -15,7 +15,7 @@ import { TOKENS } from '../tokens';
 // touches TDLib.
 export const registerFeishu = ({ get, register }: Registrar): void => {
   register(TOKENS.FEISHU_SDK, () =>
-    createFeishuSdk(loadFeishuCredentials(get(TOKENS.CONFIG).feishu.credentialsFile), get(TOKENS.LOGGER)));
+    createFeishuSdk(requireFeishuConfig(get(TOKENS.CONFIG)), get(TOKENS.LOGGER)));
 
   register(TOKENS.FEISHU_BOT_IDENTITY, () => createFeishuBotIdentity(get(TOKENS.FEISHU_SDK).api));
 

@@ -39,12 +39,10 @@ vi.mock('../feishu/sdk', () => ({ createFeishuSdk: sdk.createFeishuSdk }));
 
 const CHAT = 'oc_synthetic_group';
 const directory = mkdtempSync(join(tmpdir(), 'feishu-mode-'));
-const credentialsFile = join(directory, 'feishu.env');
-writeFileSync(credentialsFile, 'FEISHU_APP_ID=cli_0123456789abcdef\nFEISHU_APP_SECRET=synthetic-secret\n');
 const configPath = join(directory, 'config.yaml');
 writeFileSync(configPath, stringify({
   platform: 'feishu',
-  feishu: { credentialsFile },
+  feishu: { appId: 'cli_0123456789abcdef', appSecret: 'synthetic-secret' },
   models: { primary: { apiBaseUrl: 'https://example.test', apiKey: 'test', model: 'test' } },
   database: { path: join(directory, 'test.db') },
   runtime: { writeFile: ['cat'], readFile: ['cat'] },

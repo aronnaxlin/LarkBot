@@ -1,0 +1,1 @@
+ALTER TABLE `turn_responses_v2` ADD `shell_tools_exposed` integer DEFAULT false NOT NULL;

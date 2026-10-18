@@ -5,6 +5,9 @@ import type { ConversationEntry } from '../unified-api/types';
 export interface TurnResponseV2 {
   requestedAtMs: number;
   entries: ConversationEntry[];
+  // Bash gate decision of the turn that wrote this step. Persisted on every
+  // step; an interrupted continuation reuses it instead of recomputing.
+  shellToolsExposed: boolean;
   inputTokens: number;
   outputTokens: number;
   cacheReadTokens: number;
@@ -27,6 +30,10 @@ export interface ProbeResponseV2 {
 export interface DriverConfig {
   chatIds: string[];
   resolveChatConfig: (chatId: string) => ResolvedChatConfig;
+  // Trusted-maintainer predicate from deployment config (TOKENS.IS_MAINTAINER).
+  // Absent means no maintainers: chats with tools.bash.requireMaintainer stay
+  // gated closed.
+  isMaintainer?: (userId: string) => boolean;
 }
 
 export interface CompactionConfig {

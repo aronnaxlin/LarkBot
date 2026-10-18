@@ -421,6 +421,11 @@ describe('render', () => {
       expect(result).not.toContain('</message>');
       expect(result).not.toContain('hello');
     });
+
+    it('marks the segment deleted while keeping the sender id', () => {
+      const segments = render(ic([message({ deleted: true })]), { maintainers: new Set(['1']) });
+      expect(segments.find(seg => seg.isDeleted === true)).toMatchObject({ senderId: '1', isDeleted: true });
+    });
   });
 
   describe('edited message', () => {

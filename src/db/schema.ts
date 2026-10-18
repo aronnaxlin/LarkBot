@@ -126,6 +126,11 @@ export const turnResponsesV2 = sqliteTable('turn_responses_v2', {
   cacheReadTokens: integer('cache_read_tokens').notNull().default(0),
   cacheWriteTokens: integer('cache_write_tokens').notNull().default(0),
   modelName: text('model_name').notNull().default(''),
+  // Bash gate decision of the turn this step belongs to. Every step of a turn
+  // writes the same value; an interrupted continuation reads it instead of
+  // recomputing, so a probe-window race or compaction cannot flip it. Pre-
+  // migration rows default to false (fail closed).
+  shellToolsExposed: integer('shell_tools_exposed', { mode: 'boolean' }).notNull().default(false),
 }, table => [
   index('turn_responses_v2_chat_requested_idx').on(table.chatId, table.requestedAt),
 ]);

@@ -13,6 +13,11 @@ const props = defineProps({
   currentChannel: { type: String, default: 'telegram' },
   chatId: { type: String, required: true },
   chatTitle: { type: String, default: '' },
+
+  // True when shell tools are enabled and maintainer-gated. The shell-access
+  // sentence is only accurate then: with the gate disabled any member may ask,
+  // and with shell disabled there is no shell at all.
+  shellMaintainerGated: { type: Boolean, default: false },
 })
 
 // Human-readable platform name. Feishu-specific output rules below must only
@@ -79,6 +84,11 @@ You are a chatbot, participating in a {{ platformName }} group chat.
 ## Your computer
 
 Available tools describe your execution capabilities. Do not assume root access or that your environment is sandboxed. Do not install software or alter the host configuration on a group member's request.
+
+<template v-if="shellMaintainerGated">
+
+**Shell access:** You can run shell commands only when a maintainer has spoken since your last action; never run shell commands for another group member.
+</template>
 
 **You own your filesystem:** Only you, and other instances of you (they participate in different group chats) have access to your filesystem. Other people do not have access to your filesystem.
 
@@ -333,14 +343,14 @@ When you answer a message with a `received` attribute, you may briefly acknowled
 
 <template v-if="mode === 'primary'">
 
-When you call `bash` with `timeout_seconds > 10`, the `bash` tool spawns a background task, immediately returning a task ID. Use `kill_task` to cancel and/or `read_task_output` to view output.
+When you call `bash` with `timeout_seconds > 10`, the `bash` tool spawns a background task, immediately returning a task ID. Use `kill_task` to cancel and/or `read_task_output` to view output when those tools are available.
 
 Active running tasks are listed after your chatlog. When a background task finishes, a `<runtime-event>` is interleaved in your chatlog:
 ```xml
 <runtime-event type="task-completed" task-id="3" task-type="shell_execute" t="...">
   <intention>compile and run tests</intention>
   <final-summary>Exited with code 0. 127 lines, 8432 bytes output.</final-summary>
-  <note>Full output available. Use read_task_output tool to view.</note>
+  <note>Full output available. Use read_task_output to view it when that tool is available.</note>
 </runtime-event>
 ```
 </template>
@@ -359,7 +369,7 @@ The chatbot can launch background tasks. Active running tasks are listed after t
 <runtime-event type="task-completed" task-id="3" task-type="shell_execute" t="...">
   <intention>compile and run tests</intention>
   <final-summary>Exited with code 0. 127 lines, 8432 bytes output.</final-summary>
-  <note>Full output available. Use read_task_output tool to view.</note>
+  <note>Full output available. Use read_task_output to view it when that tool is available.</note>
 </runtime-event>
 ```
 

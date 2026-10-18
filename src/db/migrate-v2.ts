@@ -57,6 +57,8 @@ export const migrateV1ToV2 = async (db: DB, logger: Logger): Promise<void> => {
     cacheReadTokens: 0,
     cacheWriteTokens: 0,
     modelName: '',
+    // v1 rows predate shell gating; fail closed rather than exposing bash.
+    shellToolsExposed: false,
   })));
 
   const probeInserts = await Promise.all(v1Probes.map(async row => ({

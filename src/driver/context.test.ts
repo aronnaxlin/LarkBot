@@ -15,6 +15,7 @@ const textSeg = (ts: number, text: string): RenderedContext[number] => ({
 const tr = (ts: number, entries: ConversationEntry[], modelName = CURRENT_MODEL): TurnResponseV2 => ({
   requestedAtMs: ts,
   entries,
+  shellToolsExposed: false,
   inputTokens: 0,
   outputTokens: 0,
   cacheReadTokens: 0,

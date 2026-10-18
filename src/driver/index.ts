@@ -53,6 +53,7 @@ export const createDriver = (config: DriverConfig, deps: DriverPlatform & {
   const { logger } = deps;
   const log = logger.withContext('driver');
   const chatIds = new Set(config.chatIds);
+  const isMaintainer = config.isMaintainer ?? (() => false);
 
   const getLastProcessedTime = async (chatId: string): Promise<number> => {
     const trs = await deps.loadTurnResponses(chatId);
@@ -158,6 +159,7 @@ export const createDriver = (config: DriverConfig, deps: DriverPlatform & {
             runner,
             getLastProcessedMs: lastProcessedMs,
             setLastProcessedMs: lastProcessedMs,
+            isMaintainer,
             probeActivation,
             onProbeActivated: activation => { probeActivation = activation; },
             probeWindow,

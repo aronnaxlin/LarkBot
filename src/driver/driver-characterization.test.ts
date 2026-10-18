@@ -56,7 +56,7 @@ const makeChatConfig = (): ResolvedChatConfig => ({
   imageToText: { enabled: false, maxConcurrency: 1 },
   animationToText: { enabled: false, maxFrames: 0, maxConcurrency: 1 },
   customEmojiToText: { enabled: false, maxFrames: 0, maxConcurrency: 1 },
-  tools: { banSpammer: false, bash: { enabled: true, backgroundThresholdSec: 10 } },
+  tools: { banSpammer: false, bash: { enabled: true, backgroundThresholdSec: 10, requireMaintainer: false, maintainerWindowSec: 600 } },
 });
 
 const buildExternalContext = (receivedAtMs = 1000): RenderedContext => [{
@@ -370,6 +370,7 @@ describe('Probe timeout and wake-up liveness', () => {
 const workTurn = (requestedAtMs: number, requiresFollowUp: boolean, name = 'bash'): TurnResponseV2 => ({
   requestedAtMs,
   modelName: 'mock-primary',
+  shellToolsExposed: true,
   inputTokens: 1,
   outputTokens: 1,
   cacheReadTokens: 0,

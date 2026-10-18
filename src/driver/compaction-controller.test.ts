@@ -54,7 +54,7 @@ const makeController = (rendered: ReturnType<typeof signal<RenderedContext>>) =>
       imageToText: { enabled: false, maxConcurrency: 1 },
       animationToText: { enabled: false, maxFrames: 1, maxConcurrency: 1 },
       customEmojiToText: { enabled: false, maxFrames: 1, maxConcurrency: 1 },
-      tools: { banSpammer: false, bash: { enabled: true, backgroundThresholdSec: 10 } },
+      tools: { banSpammer: false, bash: { enabled: true, backgroundThresholdSec: 10, requireMaintainer: true, maintainerWindowSec: 600 } },
     },
     context: rendered,
     compactionMeta: signal<CompactionSessionMeta | null>(null),

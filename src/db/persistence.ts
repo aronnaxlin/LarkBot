@@ -336,6 +336,7 @@ export const persistTurnResponse = async (db: DB, chatId: string, tr: TurnRespon
     cacheReadTokens: tr.cacheReadTokens,
     cacheWriteTokens: tr.cacheWriteTokens,
     modelName: tr.modelName,
+    shellToolsExposed: tr.shellToolsExposed,
   }).run();
 };
 
@@ -351,6 +352,7 @@ const reconstructTurnResponseV2 = async (row: TurnResponseV2Row): Promise<TurnRe
     cacheReadTokens: row.cacheReadTokens,
     cacheWriteTokens: row.cacheWriteTokens,
     modelName: row.modelName,
+    shellToolsExposed: row.shellToolsExposed,
   };
 };
 

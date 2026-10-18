@@ -51,6 +51,17 @@ describe.each(MODES)('late-binding.velin.md (mode=%s)', mode => {
   });
 });
 
+describe('shell access wording', () => {
+  it('renders only when shell is enabled and maintainer-gated', async () => {
+    const gated = await renderTemplate('system.velin.md', { mode: 'primary', shellMaintainerGated: true, ...SYSTEM_PROPS });
+    expect(gated).toContain('Shell access');
+    const open = await renderTemplate('system.velin.md', { mode: 'primary', shellMaintainerGated: false, ...SYSTEM_PROPS });
+    expect(open).not.toContain('Shell access');
+    const unset = await renderTemplate('system.velin.md', { mode: 'primary', ...SYSTEM_PROPS });
+    expect(unset).not.toContain('Shell access');
+  });
+});
+
 // Remaining prompt templates compile
 describe.each([
   'compaction-system.velin.md',

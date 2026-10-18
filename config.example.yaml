@@ -137,6 +137,12 @@ chats:
       # Enable per chat only; moderation policy belongs in that chat's systemFiles.
       banSpammer: false
       bash:
+        # Shell tools (`bash`, `kill_task`, `read_task_output`) are exposed only
+        # when a trusted maintainer spoke since the bot's last action.
+        requireMaintainer: true
+        # A maintainer message older than this many seconds no longer opens the
+        # gate (bounds the window after silent turns and no_action probes).
+        maintainerWindowSec: 600
         backgroundThresholdSec: 10
       web:
         providers:

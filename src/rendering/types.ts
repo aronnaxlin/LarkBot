@@ -63,6 +63,10 @@ export interface RenderedContextSegment {
   mentionsMe?: boolean;
   // Reply-to target is a message sent by this bot
   repliesToMe?: boolean;
+  // Message was deleted before/after the bot saw it. The sender id survives,
+  // but the message is listed as a tombstone. Used by the bash gate so a
+  // deleted maintainer message cannot open shell access.
+  isDeleted?: boolean;
   // Sender is a bot account other than this one (rendered `bot="true"`).
   // Self messages carry `isMyself` instead, even though they are also a bot.
   isBot?: boolean;

@@ -1,5 +1,6 @@
 import type { Logger } from '@guiiai/logg';
 
+import { resolveBashGate, SHELL_TOOL_NAMES } from './bash-gate';
 import { composeContext, composeProbeContext, injectLateBindingPrompt, lastActedAtMs, latestExternalEventMs, wasToolLoopInterrupted } from './context';
 import type { ProbeWindowState } from './context';
 import { computeParticipationStats } from './participation-stats';
@@ -63,6 +64,9 @@ export const executeWakeup = async (params: {
   getLastProcessedMs: () => number;
   setLastProcessedMs: (value: number) => void;
   turnBudget?: TurnBudget;
+  // Trusted-maintainer predicate from deployment config; the bash gate decides
+  // tool exposure from canonical sender ids only.
+  isMaintainer: (userId: string) => boolean;
   // Per-chat probe window start, carried across wake-ups so the probe prefix
   // stays stable between hysteresis jumps. Mutated in place by the probe call.
   probeWindow?: ProbeWindowState;
@@ -94,6 +98,28 @@ export const executeWakeup = async (params: {
   }).log('Triggering LLM call');
 
   const interrupted = wasToolLoopInterrupted(turnResponses);
+  const bashGate = resolveBashGate({
+    rc: params.contextAtStart,
+    turnResponses,
+    interrupted,
+    isMaintainer: params.isMaintainer,
+    requireMaintainer: params.chatConfig.tools.bash.requireMaintainer,
+    nowMs: Date.now(),
+    maintainerWindowMs: params.chatConfig.tools.bash.maintainerWindowSec * 1000,
+  });
+  if (bashGate.reason === 'maintainer')
+    params.log.withFields({ chatId: params.chatId, maintainerId: bashGate.maintainerId }).log('Bash tool gate open');
+  else if (bashGate.reason === 'persisted')
+    params.log.withFields({ chatId: params.chatId }).log('Bash tool gate open (chain decision reused)');
+  else if (bashGate.reason === 'maintainer-required-off')
+    params.log.withFields({ chatId: params.chatId }).debug('Bash tool gate open (requireMaintainer disabled)');
+  else if (params.chatConfig.tools.bash.enabled)
+    // Info only where the shell tools would otherwise have been exposed; a
+    // chat that disabled bash should not log this every wake-up.
+    params.log.withFields({ chatId: params.chatId, interrupted, reason: bashGate.reason }).log('Bash tool gate closed');
+  else
+    params.log.withFields({ chatId: params.chatId, interrupted, reason: bashGate.reason }).debug('Bash tool gate closed (bash disabled)');
+  const shellMaintainerGated = params.chatConfig.tools.bash.enabled && params.chatConfig.tools.bash.requireMaintainer;
   const backgroundTasks = params.getActiveBackgroundTasks(params.chatId);
   const timeNow = localTimeNow();
   // Derived from the unfiltered context: `isMyself` segments are the bot's own
@@ -144,6 +170,7 @@ export const executeWakeup = async (params: {
       chatId: params.chatId,
       chatTitle: params.getChatTitle(params.chatId),
       systemFiles: params.chatConfig.systemFiles,
+      shellMaintainerGated,
     });
     const entries = [...probeContext.entries];
     injectLateBindingPrompt(entries, await renderLateBindingPrompt({
@@ -225,6 +252,7 @@ export const executeWakeup = async (params: {
       chatId: params.chatId,
       chatTitle: params.getChatTitle(params.chatId),
       systemFiles: params.chatConfig.systemFiles,
+      shellMaintainerGated,
     });
     injectLateBindingPrompt(primaryContext.entries, await renderLateBindingPrompt({
       mode: 'primary',
@@ -236,9 +264,13 @@ export const executeWakeup = async (params: {
       ...(reactOnly ? { reactOnly: true } : {}),
       ...participationStats,
     }));
-    const tools = reactOnly
+    const tools = (reactOnly
       ? params.createTools().filter(tool => REACT_ONLY_TOOL_NAMES.has(tool.name))
-      : params.createTools();
+      : params.createTools())
+      // The gate is decided once per wake-up; the same tool set serves every
+      // step of the turn, so a maintainer message arriving mid-chain cannot
+      // open it and a closed gate cannot leak into a later turn.
+      .filter(tool => bashGate.open || !SHELL_TOOL_NAMES.has(tool.name));
 
     const persistStep = async (
       entries: TurnResponseV2['entries'],
@@ -248,6 +280,7 @@ export const executeWakeup = async (params: {
       await params.persistTurnResponse(params.chatId, {
         requestedAtMs,
         entries,
+        shellToolsExposed: bashGate.open,
         ...usage,
         modelName: params.chatConfig.primary.model.model,
       });

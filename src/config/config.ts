@@ -59,6 +59,11 @@ const ProbeContextEstTokensSchema = v.pipe(v.number(), v.integer(), v.minValue(1
 // truncated from the end above it. Below 1K the summary is useless as context.
 const ProbeSummaryMaxEstTokensSchema = v.pipe(v.number(), v.integer(), v.minValue(1_000));
 
+// How recent a maintainer message must be to keep the shell gate open (seconds).
+// Bounds the window after a silent turn or a `no_action` probe, which does not
+// advance the bot's last action.
+const BashMaintainerWindowSecSchema = v.pipe(v.number(), v.integer(), v.minValue(1));
+
 // Number of newest turn responses whose provider reasoning is replayed.
 const ReasoningReplayTurnsSchema = v.pipe(v.number(), v.integer(), v.minValue(0));
 
@@ -111,6 +116,10 @@ const ChatConfigSchema = v.object({
       // execution backend exists.
       enabled: v.optional(v.boolean(), true),
       backgroundThresholdSec: v.optional(v.number(), 10),
+      // Expose shell tools only when a message from a trusted maintainer
+      // arrived after the bot's last action.
+      requireMaintainer: v.optional(v.boolean(), true),
+      maintainerWindowSec: v.optional(BashMaintainerWindowSecSchema, 600),
     }), {}),
     web: v.optional(v.object({
       providers: v.optional(v.object({
@@ -173,6 +182,8 @@ const ChatOverrideSchema = v.optional(v.partial(v.object({
     bash: v.partial(v.object({
       enabled: v.boolean(),
       backgroundThresholdSec: v.number(),
+      requireMaintainer: v.boolean(),
+      maintainerWindowSec: BashMaintainerWindowSecSchema,
     })),
     web: v.partial(v.object({
       providers: v.partial(v.object({
@@ -253,7 +264,7 @@ export interface ResolvedChatConfig {
   customEmojiToText: { enabled: boolean; model?: string; maxFrames: number; maxConcurrency: number };
   tools: {
     banSpammer: boolean;
-    bash: { enabled: boolean; backgroundThresholdSec: number };
+    bash: { enabled: boolean; backgroundThresholdSec: number; requireMaintainer: boolean; maintainerWindowSec: number };
     webSearch?: WebSearchConfig;
     webFetch?: WebFetchConfig;
   };
@@ -323,6 +334,19 @@ export const resolveModel = (config: Config, name: string): LlmEndpoint => {
 /** Return whitelisted chat IDs (all keys in chats except "default"). */
 export const getChatIds = (config: Config): string[] =>
   Object.keys(config.chats).filter(k => k !== 'default');
+
+/**
+ * Chats whose shell tools can never be exposed: bash is enabled and
+ * maintainer-gated, but no maintainer id is configured. Startup warns once per
+ * such chat; the gate stays closed forever (fail closed).
+ */
+export const findChatsWithUnreachableShellGate = (config: Config): string[] => {
+  if (config.maintainers.length > 0) return [];
+  return getChatIds(config).filter(chatId => {
+    const merged = mergeChatConfig(config, chatId);
+    return merged.tools.bash.enabled && merged.tools.bash.requireMaintainer;
+  });
+};
 
 /** Deep-merge default chat config with per-chat overrides and resolve model names. */
 export const resolveChatConfig = (config: Config, chatId: string): ResolvedChatConfig => {
@@ -395,6 +419,8 @@ export const resolveChatConfig = (config: Config, chatId: string): ResolvedChatC
       bash: {
         enabled: merged.tools.bash.enabled,
         backgroundThresholdSec: merged.tools.bash.backgroundThresholdSec,
+        requireMaintainer: merged.tools.bash.requireMaintainer,
+        maintainerWindowSec: merged.tools.bash.maintainerWindowSec,
       },
       ...(webSearch ? { webSearch } : {}),
       ...(webFetch ? { webFetch } : {}),

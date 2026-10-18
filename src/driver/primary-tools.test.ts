@@ -52,7 +52,7 @@ const createFixture = () => {
       imageToText: { enabled: false },
       tools: {
         banSpammer: false,
-        bash: { enabled: true, backgroundThresholdSec: 10 },
+        bash: { enabled: true, backgroundThresholdSec: 10, requireMaintainer: true, maintainerWindowSec: 600 },
       },
     },
     runtimeConfig: {

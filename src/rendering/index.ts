@@ -162,7 +162,7 @@ const hasMention = (nodes: ContentNode[], userId: string): boolean =>
 
 // --- ICNode → content pieces ---
 
-const renderMessage = (msg: ICMessage, state: RenderState): { content: RenderedContentPiece[]; senderId?: string; isMyself: boolean; isSelfSent: boolean; isBot: boolean; mentionsMe: boolean; repliesToMe: boolean } => {
+const renderMessage = (msg: ICMessage, state: RenderState): { content: RenderedContentPiece[]; senderId?: string; isMyself: boolean; isSelfSent: boolean; isBot: boolean; mentionsMe: boolean; repliesToMe: boolean; isDeleted?: boolean } => {
   const { params } = state;
   const isMyself = !!(params.botUserId && msg.sender?.id === params.botUserId);
   const isSelfSent = !!msg.isSelfSent;
@@ -221,7 +221,7 @@ const renderMessage = (msg: ICMessage, state: RenderState): { content: RenderedC
 
   if (msg.deleted) {
     attrs.push('deleted="true"');
-    return { content: [{ type: 'text', text: `<message ${attrs.join(' ')}/>` }], senderId: msg.sender?.id, isMyself, isSelfSent, isBot, mentionsMe, repliesToMe };
+    return { content: [{ type: 'text', text: `<message ${attrs.join(' ')}/>` }], senderId: msg.sender?.id, isMyself, isSelfSent, isBot, mentionsMe, repliesToMe, isDeleted: true };
   }
 
   const parts: string[] = [];
@@ -321,7 +321,7 @@ const renderRuntimeEvent = (event: ICRuntimeEvent, state: RenderState): string =
     parts.push(`<intention>${escapeXml(event.intention)}</intention>`);
   parts.push(`<final-summary>\n${escapeXml(event.finalSummary)}\n</final-summary>`);
   if (event.hasFullOutput)
-    parts.push('<note>Full output available. Use read_task_output tool to view.</note>');
+    parts.push('<note>Full output available. Use read_task_output to view it when that tool is available.</note>');
 
   return `<runtime-event ${attrs.join(' ')}>\n${parts.join('\n')}\n</runtime-event>`;
 };
@@ -343,8 +343,8 @@ export const render = (ic: IntermediateContext, params: RenderParams = {}): Rend
     if (params.compactCursorMs != null && node.receivedAtMs < params.compactCursorMs) continue;
 
     if (node.type === 'message') {
-      const { content, senderId, isMyself, isSelfSent, isBot, mentionsMe, repliesToMe } = renderMessage(node, state);
-      segments.push({ receivedAtMs: node.receivedAtMs, content, ...(senderId && { senderId }), ...(isMyself && { isMyself }), ...(isSelfSent && { isSelfSent }), ...(isBot && { isBot }), ...(mentionsMe && { mentionsMe }), ...(repliesToMe && { repliesToMe }) });
+      const { content, senderId, isMyself, isSelfSent, isBot, mentionsMe, repliesToMe, isDeleted } = renderMessage(node, state);
+      segments.push({ receivedAtMs: node.receivedAtMs, content, ...(senderId && { senderId }), ...(isMyself && { isMyself }), ...(isSelfSent && { isSelfSent }), ...(isBot && { isBot }), ...(mentionsMe && { mentionsMe }), ...(repliesToMe && { repliesToMe }), ...(isDeleted && { isDeleted }) });
     } else if (node.type === 'runtime_event') {
       const content = [{ type: 'text' as const, text: renderRuntimeEvent(node, state) }];
       segments.push({ receivedAtMs: node.receivedAtMs, content, isRuntimeEvent: true });

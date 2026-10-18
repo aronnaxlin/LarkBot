@@ -37,6 +37,9 @@ export const renderSystemPrompt = async (params: {
   chatId: string;
   chatTitle?: string;
   systemFiles?: { filename: string; content: string }[];
+  // Whether shell tools are enabled and maintainer-gated; the template renders
+  // its shell-access sentence only when true.
+  shellMaintainerGated?: boolean;
 }) => {
   const { rendered } = await renderMarkdownString(systemPromptTemplate, params, basePath);
   return cleanVelinOutput(rendered);

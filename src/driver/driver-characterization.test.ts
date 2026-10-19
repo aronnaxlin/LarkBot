@@ -53,6 +53,7 @@ const makeChatConfig = (): ResolvedChatConfig => ({
     contextEstTokens: 20000,
     summaryMaxEstTokens: 20000,
   },
+  participation: { style: 'normal', brakeMessages10m: 10, cooldownSec: 0, maxPerHour: 0 },
   imageToText: { enabled: false, maxConcurrency: 1 },
   animationToText: { enabled: false, maxFrames: 0, maxConcurrency: 1 },
   customEmojiToText: { enabled: false, maxFrames: 0, maxConcurrency: 1 },

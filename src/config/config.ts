@@ -64,6 +64,14 @@ const ProbeSummaryMaxEstTokensSchema = v.pipe(v.number(), v.integer(), v.minValu
 // advance the bot's last action.
 const BashMaintainerWindowSecSchema = v.pipe(v.number(), v.integer(), v.minValue(1));
 
+// Group-participation knobs (see AGENTS.md "Participation And Turn Budget").
+// `style` steers the probe's bar for unaddressed chatter; `brakeMessages10m` is
+// the soft self-volume brake; `cooldownSec`/`maxPerHour` are opt-in hard
+// limits on unaddressed speech (0 = off).
+const ParticipationStyleSchema = v.picklist(['quiet', 'normal', 'lively']);
+const BrakeMessages10mSchema = v.pipe(v.number(), v.integer(), v.minValue(1));
+const NonNegativeIntSchema = v.pipe(v.number(), v.integer(), v.minValue(0));
+
 // Number of newest turn responses whose provider reasoning is replayed.
 const ReasoningReplayTurnsSchema = v.pipe(v.number(), v.integer(), v.minValue(0));
 
@@ -91,6 +99,12 @@ const ChatConfigSchema = v.object({
     timeoutMs: v.optional(ProbeTimeoutMsSchema, DEFAULT_PROBE_TIMEOUT_MS),
     contextEstTokens: v.optional(ProbeContextEstTokensSchema, 20000),
     summaryMaxEstTokens: v.optional(ProbeSummaryMaxEstTokensSchema, 20000),
+  }), {}),
+  participation: v.optional(v.object({
+    style: v.optional(ParticipationStyleSchema, 'normal'),
+    brakeMessages10m: v.optional(BrakeMessages10mSchema, 10),
+    cooldownSec: v.optional(NonNegativeIntSchema, 0),
+    maxPerHour: v.optional(NonNegativeIntSchema, 0),
   }), {}),
   imageToText: v.optional(v.object({
     enabled: v.optional(v.boolean(), false),
@@ -159,6 +173,12 @@ const ChatOverrideSchema = v.optional(v.partial(v.object({
     timeoutMs: ProbeTimeoutMsSchema,
     contextEstTokens: ProbeContextEstTokensSchema,
     summaryMaxEstTokens: ProbeSummaryMaxEstTokensSchema,
+  })),
+  participation: v.partial(v.object({
+    style: ParticipationStyleSchema,
+    brakeMessages10m: BrakeMessages10mSchema,
+    cooldownSec: NonNegativeIntSchema,
+    maxPerHour: NonNegativeIntSchema,
   })),
   imageToText: v.partial(v.object({
     enabled: v.boolean(),
@@ -265,6 +285,13 @@ export type ChatConfig = v.InferOutput<typeof ChatConfigSchema>;
 export type RuntimeConfig = Config['runtime'];
 export type BackgroundTasksConfig = Config['backgroundTasks'];
 
+export interface ParticipationConfig {
+  style: 'quiet' | 'normal' | 'lively';
+  brakeMessages10m: number;
+  cooldownSec: number;
+  maxPerHour: number;
+}
+
 export interface ResolvedChatConfig {
   primary: { model: LlmEndpoint; turnBudget: TurnBudget; reasoningReplayTurns: number };
   systemFiles: { filename: string; content: string }[];
@@ -273,6 +300,7 @@ export interface ResolvedChatConfig {
   debounce: DebounceConfig;
   compaction: CompactionConfig;
   probe: { model: LlmEndpoint; timeoutMs: number; contextEstTokens: number; summaryMaxEstTokens: number };
+  participation: ParticipationConfig;
   imageToText: { enabled: boolean; model?: string; maxConcurrency: number };
   animationToText: { enabled: boolean; model?: string; maxFrames: number; maxConcurrency: number };
   customEmojiToText: { enabled: boolean; model?: string; maxFrames: number; maxConcurrency: number };
@@ -424,6 +452,7 @@ export const resolveChatConfig = (config: Config, chatId: string): ResolvedChatC
       contextEstTokens: merged.probe.contextEstTokens,
       summaryMaxEstTokens: merged.probe.summaryMaxEstTokens,
     },
+    participation: { ...merged.participation },
     imageToText: {
       enabled: merged.imageToText.enabled,
       model: merged.imageToText.model,

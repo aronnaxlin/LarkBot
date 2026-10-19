@@ -40,6 +40,7 @@ const makeChatConfig = (): ResolvedChatConfig => ({
     contextEstTokens: 20000,
     summaryMaxEstTokens: 20000,
   },
+  participation: { style: 'normal', brakeMessages10m: 10, cooldownSec: 0, maxPerHour: 0 },
   imageToText: { enabled: false, maxConcurrency: 1 },
   animationToText: { enabled: false, maxFrames: 0, maxConcurrency: 1 },
   customEmojiToText: { enabled: false, maxFrames: 0, maxConcurrency: 1 },
@@ -735,5 +736,51 @@ describe('probe vs primary view of bot\'s own messages', () => {
     expect(secondProbeText).toContain('@LarkBot please answer me');
 
     driver.stop();
+  });
+  describe('participation limits', () => {
+    const limitedConfig = (): ResolvedChatConfig => ({
+      ...makeChatConfig(),
+      participation: { style: 'normal', brakeMessages10m: 10, cooldownSec: 300, maxPerHour: 0 },
+    });
+    const recentRC = (lastMessage: Partial<RenderedContext[number]>): RenderedContext => {
+      const now = Date.now();
+      return [
+        { receivedAtMs: now - 5000, senderId: 'user1', content: [{ type: 'text', text: '<message id="1" sender="Alice" t="t">hello</message>' }] },
+        { receivedAtMs: now - 4000, senderId: 'bot', isMyself: true, isSelfSent: true, content: [{ type: 'text', text: '<message id="2" sender="Bot" myself="true" t="t">hi</message>' }] },
+        { receivedAtMs: now - 3000, senderId: 'user1', content: [{ type: 'text', text: '<message id="3" sender="Alice" t="t">lol nice</message>' }], ...lastMessage },
+      ];
+    };
+
+    it('refuses a reaction and tells the probe only a direct address may wake the bot during a cooldown', async () => {
+      mockCallLlm.mockReset();
+      mockCallLlm.mockImplementation(async config => config.model === 'mock-probe' ? reactOnlyProbe() : primaryReact('r1'));
+      const h = makeReactOnlyHarness();
+      const driver = createDriver({ chatIds: ['-100130'], resolveChatConfig: limitedConfig }, h.deps);
+
+      driver.handleEvent('-100130', recentRC({}));
+      await vi.waitFor(() => expect(h.persistedProbes).toHaveLength(1), { timeout: 1000, interval: 10 });
+      await new Promise<void>(resolve => setTimeout(resolve, 20));
+
+      expect(collectUserText(mockCallLlm.mock.calls[0]![1])).toContain('Participation limit reached');
+      expect(mockCallLlm.mock.calls.map(call => call[0]!.model)).toEqual(['mock-probe']);
+      expect(h.persistedProbes[0]!.isActivated).toBe(false);
+      expect(h.reactions).toEqual([]);
+      driver.stop();
+    });
+
+    it('lets an @-mention bypass the cooldown deterministically', async () => {
+      mockCallLlm.mockReset();
+      mockCallLlm.mockImplementation(async config => config.model === 'mock-probe' ? reactOnlyProbe() : primaryReact('r1'));
+      const h = makeReactOnlyHarness();
+      const driver = createDriver({ chatIds: ['-100131'], resolveChatConfig: limitedConfig }, h.deps);
+
+      driver.handleEvent('-100131', recentRC({ mentionsMe: true }));
+      await vi.waitFor(() => expect(h.persistedTRs).toHaveLength(1), { timeout: 1000, interval: 10 });
+
+      expect(collectUserText(mockCallLlm.mock.calls[0]![1])).not.toContain('Participation limit reached');
+      expect(h.persistedProbes[0]!.isActivated).toBe(true);
+      expect(h.reactions).toEqual(['😂']);
+      driver.stop();
+    });
   });
 });

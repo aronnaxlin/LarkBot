@@ -40,6 +40,10 @@ export const renderSystemPrompt = async (params: {
   // Whether shell tools are enabled and maintainer-gated; the template renders
   // its shell-access sentence only when true.
   shellMaintainerGated?: boolean;
+  // `chats.<id>.participation`: the probe's bar for unaddressed chatter and the
+  // soft self-volume brake. Static per chat, so the prompt prefix stays cached.
+  participationStyle?: 'quiet' | 'normal' | 'lively';
+  brakeMessages10m?: number;
 }) => {
   const { rendered } = await renderMarkdownString(systemPromptTemplate, params, basePath);
   return cleanVelinOutput(rendered);
@@ -59,6 +63,11 @@ export const renderLateBindingPrompt = async (params: {
   recentSelfMessages10m?: number;
   secondsSinceLastSelfMessage?: number;
   consecutiveBotExchanges?: number;
+  // Soft self-volume brake threshold (messages in 10 minutes).
+  brakeMessages10m?: number;
+  // A hard participation limit is reached and nothing deterministic addresses
+  // the bot: only a direct address may wake it.
+  participationLimited?: boolean;
 }) => {
   const { rendered } = await renderMarkdownString(lateBindingTemplate, params, basePath);
   return cleanVelinOutput(rendered);

@@ -25,6 +25,12 @@ const props = defineProps({
   recentSelfMessages10m: { type: Number, default: undefined },
   secondsSinceLastSelfMessage: { type: Number, default: undefined },
   consecutiveBotExchanges: { type: Number, default: undefined },
+
+  // Soft self-volume brake (`chats.<id>.participation.brakeMessages10m`).
+  brakeMessages10m: { type: Number, default: 10 },
+  // Probe only: a configured hard participation limit is reached and no
+  // @-mention, quote-reply or runtime event addresses the bot.
+  participationLimited: { type: Boolean, default: false },
 })
 
 const platformName = computed(() => props.currentChannel === 'feishu' ? 'Feishu (Lark)' : 'Telegram')
@@ -118,7 +124,7 @@ Active background tasks:
 
 - Your last message was {{ secondsSinceLastSelfMessage }} seconds ago.
 </template>
-<template v-if="recentSelfMessages10m != null && recentSelfMessages10m > 10">
+<template v-if="recentSelfMessages10m != null && recentSelfMessages10m > brakeMessages10m">
 
 - That is more than the room needs from one member right now: unless someone @-mentions you, replies to you, or calls you by name, default to a reaction or staying silent, and speak only if you truly have something to add.
 </template>
@@ -179,6 +185,14 @@ Active background tasks the bot is currently waiting on:
 
 - Since the last human message, {{ consecutiveBotExchanges }} consecutive messages have come from bots.
 </template>
+
+</template>
+
+<template v-if="participationLimited">
+
+## Participation limit reached
+
+The chatbot has reached this chat's configured limit on speaking up unprompted. Only an unanswered direct address from a human (calling it by name in a way that clearly targets it) may wake it now: then return `send_message`. For everything else return `no_action`; reactions are not allowed under the limit either.
 
 </template>
 

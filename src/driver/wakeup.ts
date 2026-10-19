@@ -3,6 +3,7 @@ import type { Logger } from '@guiiai/logg';
 import { resolveBashGate, SHELL_TOOL_NAMES } from './bash-gate';
 import { composeContext, composeProbeContext, injectLateBindingPrompt, lastActedAtMs, latestExternalEventMs, wasToolLoopInterrupted } from './context';
 import type { ProbeWindowState } from './context';
+import { evaluateParticipationLimit } from './participation-limit';
 import { computeParticipationStats } from './participation-stats';
 import type { DriverPlatform } from './platform';
 import { renderLateBindingPrompt, renderSystemPrompt } from './prompt';
@@ -120,6 +121,7 @@ export const executeWakeup = async (params: {
   else
     params.log.withFields({ chatId: params.chatId, interrupted, reason: bashGate.reason }).debug('Bash tool gate closed (bash disabled)');
   const shellMaintainerGated = params.chatConfig.tools.bash.enabled && params.chatConfig.tools.bash.requireMaintainer;
+  const participation = params.chatConfig.participation;
   const backgroundTasks = params.getActiveBackgroundTasks(params.chatId);
   const timeNow = localTimeNow();
   // Derived from the unfiltered context: `isMyself` segments are the bot's own
@@ -143,6 +145,18 @@ export const executeWakeup = async (params: {
     // advances the watermark, and starting there could hide an earlier
     // unanswered address or a late-delivered event from every later probe.
     const lastActedMs = lastActedAtMs(params.contextAtStart, turnResponses);
+    const limit = evaluateParticipationLimit({
+      segments: params.contextAtStart,
+      lastActedMs,
+      nowMs: Date.now(),
+      config: participation,
+    });
+    // Limited and nothing deterministic addresses the bot: the probe may still
+    // wake it for a name-call, but not to chime in or react on its own.
+    const addressOnly = limit.limited && !limit.bypassed;
+    if (addressOnly)
+      params.log.withFields({ chatId: params.chatId, reason: limit.reason })
+        .log('Participation limit reached: only a direct address may wake the bot');
     const probeContext = composeProbeContext(
       params.contextAtStart,
       turnResponses,
@@ -171,6 +185,8 @@ export const executeWakeup = async (params: {
       chatTitle: params.getChatTitle(params.chatId),
       systemFiles: params.chatConfig.systemFiles,
       shellMaintainerGated,
+      participationStyle: participation.style,
+      brakeMessages10m: participation.brakeMessages10m,
     });
     const entries = [...probeContext.entries];
     injectLateBindingPrompt(entries, await renderLateBindingPrompt({
@@ -179,6 +195,7 @@ export const executeWakeup = async (params: {
       timeNow,
       activeBackgroundTasks: backgroundTasks,
       ...participationStats,
+      ...(addressOnly ? { participationLimited: true } : {}),
     }));
 
     const decideTool = createDecideTool();
@@ -206,13 +223,17 @@ export const executeWakeup = async (params: {
     const decision = extractDecideResult(result.entries);
     // Missing or malformed decisions fail closed. `react_only` still activates
     // primary, but with a restricted tool set so it cannot send a message.
-    const activated = decision != null && decision.should_act !== 'no_action';
-    reactOnly = decision?.should_act === 'react_only';
+    // A reaction is never an answer to a direct address, so under a reached
+    // limit it is refused outright.
+    const limitedReaction = addressOnly && decision?.should_act === 'react_only';
+    const activated = decision != null && decision.should_act !== 'no_action' && !limitedReaction;
+    reactOnly = !limitedReaction && decision?.should_act === 'react_only';
     params.log.withFields({
       chatId: params.chatId,
       shouldAct: activated,
       action: decision?.should_act,
       reason: decision?.reason,
+      ...(limitedReaction ? { refusedByParticipationLimit: true } : {}),
     }).log('Probe result');
     await params.persistProbeResponse(params.chatId, {
       requestedAtMs,
@@ -253,6 +274,8 @@ export const executeWakeup = async (params: {
       chatTitle: params.getChatTitle(params.chatId),
       systemFiles: params.chatConfig.systemFiles,
       shellMaintainerGated,
+      participationStyle: participation.style,
+      brakeMessages10m: participation.brakeMessages10m,
     });
     injectLateBindingPrompt(primaryContext.entries, await renderLateBindingPrompt({
       mode: 'primary',
@@ -263,6 +286,7 @@ export const executeWakeup = async (params: {
       ...(probeReason ? { probeReason } : {}),
       ...(reactOnly ? { reactOnly: true } : {}),
       ...participationStats,
+      brakeMessages10m: participation.brakeMessages10m,
     }));
     const tools = (reactOnly
       ? params.createTools().filter(tool => REACT_ONLY_TOOL_NAMES.has(tool.name))

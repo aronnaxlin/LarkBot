@@ -45,6 +45,19 @@ describe('platform configuration', () => {
       .toBe('https://open.example.test');
   });
 
+  it('resolves participation defaults and per-chat overrides', () => {
+    const config = fixture({ platform: 'feishu', feishu: FEISHU }, {
+      oc_synthetic: {},
+      oc_quiet: { participation: { style: 'quiet', cooldownSec: 300 } },
+    });
+    expect(resolveChatConfig(config, 'oc_synthetic').participation)
+      .toEqual({ style: 'normal', brakeMessages10m: 10, cooldownSec: 0, maxPerHour: 0 });
+    expect(resolveChatConfig(config, 'oc_quiet').participation)
+      .toEqual({ style: 'quiet', brakeMessages10m: 10, cooldownSec: 300, maxPerHour: 0 });
+    expect(() => fixture({ platform: 'feishu', feishu: FEISHU }, { oc_bad: { participation: { style: 'chatty' } } })).toThrow();
+    expect(() => fixture({ platform: 'feishu', feishu: FEISHU }, { oc_bad: { participation: { maxPerHour: -1 } } })).toThrow();
+  });
+
   it('requires valid Feishu credentials in the config file', () => {
     expect(() => fixture({ platform: 'feishu' })).toThrow('"feishu" section is required');
     expect(() => fixture({ platform: 'feishu', feishu: { ...FEISHU, appId: 'not-an-app-id' } })).toThrow('cli_ application id');

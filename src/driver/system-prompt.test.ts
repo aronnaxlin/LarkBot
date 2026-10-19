@@ -92,12 +92,26 @@ describe('participation tuning wording', () => {
     expect(probe).toContain('the latest message was authored by another bot');
     expect(probe).toContain('the latest message is addressed to someone else');
     expect(probe).toContain('plain continuation of ongoing banter is not enough');
-    expect(probe).toContain('more than ten of its own messages in the last ten minutes');
+    expect(probe).toContain('over the volume brake below');
+    expect(probe).toContain("The volume brake is more than 10 of the chatbot's own messages in the last ten minutes.");
     expect(probe).toContain('one message from the chatbot per four to six human messages');
     expect(probe).toContain('return "react_only"');
     expect(probe).toContain("the chatbot's turn in a game it is playing");
     expect(probe).toContain('states something wrong about what the chatbot said or did');
     expect(probe).toContain('clearly invites a reaction');
+  });
+
+  it('renders the participation style and brake threshold from chat config', async () => {
+    const render = (participationStyle: 'quiet' | 'normal' | 'lively') =>
+      renderTemplate('system.velin.md', { mode: 'probe', ...SYSTEM_PROPS, participationStyle, brakeMessages10m: 6 });
+    const quiet = await render('quiet');
+    const lively = await render('lively');
+    const normal = await render('normal');
+    expect(quiet).toContain('This chat wants a quiet chatbot');
+    expect(quiet).not.toContain('per four to six human messages');
+    expect(lively).toContain('per two to three human messages');
+    expect(normal).toContain('per four to six human messages');
+    expect(normal).toContain('more than 6 of the chatbot');
   });
 
   it('puts a human direct address before the bot-author rule, and both before the volume brake', async () => {

@@ -146,6 +146,16 @@ chats:
       maxFrames: 5
       maxConcurrency: 3
 
+    # How talkative the bot is in this chat (AGENTS.md "Participation And Turn
+    # Budget"). style: quiet | normal | lively. brakeMessages10m is the soft
+    # self-volume brake. cooldownSec / maxPerHour (0 = off) are hard limits on
+    # speaking up unprompted; @-mentions, quote-replies and name-calls are
+    # still answered.
+    participation:
+      style: "normal"
+      brakeMessages10m: 10
+      cooldownSec: 0
+      maxPerHour: 0
     tools:
       # Enable per chat only; moderation policy belongs in that chat's systemFiles.
       banSpammer: false

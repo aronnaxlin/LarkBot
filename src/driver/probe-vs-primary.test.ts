@@ -40,7 +40,7 @@ const makeChatConfig = (): ResolvedChatConfig => ({
     contextEstTokens: 20000,
     summaryMaxEstTokens: 20000,
   },
-  participation: { style: 'normal', brakeMessages10m: 10, cooldownSec: 0, maxPerHour: 0 },
+  participation: { style: 'normal', brakeMessages10m: 10, cooldownSec: 0, maxPerHour: 0, botRounds: 2 },
   imageToText: { enabled: false, maxConcurrency: 1 },
   animationToText: { enabled: false, maxFrames: 0, maxConcurrency: 1 },
   customEmojiToText: { enabled: false, maxFrames: 0, maxConcurrency: 1 },
@@ -740,7 +740,7 @@ describe('probe vs primary view of bot\'s own messages', () => {
   describe('participation limits', () => {
     const limitedConfig = (): ResolvedChatConfig => ({
       ...makeChatConfig(),
-      participation: { style: 'normal', brakeMessages10m: 10, cooldownSec: 300, maxPerHour: 0 },
+      participation: { style: 'normal', brakeMessages10m: 10, cooldownSec: 300, maxPerHour: 0, botRounds: 2 },
     });
     const recentRC = (lastMessage: Partial<RenderedContext[number]>): RenderedContext => {
       const now = Date.now();

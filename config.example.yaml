@@ -156,6 +156,8 @@ chats:
       brakeMessages10m: 10
       cooldownSec: 0
       maxPerHour: 0
+      # Bot-to-bot rounds a human-requested exchange may run.
+      botRounds: 2
     tools:
       # Enable per chat only; moderation policy belongs in that chat's systemFiles.
       banSpammer: false

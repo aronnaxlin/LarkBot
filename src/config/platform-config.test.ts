@@ -51,9 +51,9 @@ describe('platform configuration', () => {
       oc_quiet: { participation: { style: 'quiet', cooldownSec: 300 } },
     });
     expect(resolveChatConfig(config, 'oc_synthetic').participation)
-      .toEqual({ style: 'normal', brakeMessages10m: 10, cooldownSec: 0, maxPerHour: 0 });
+      .toEqual({ style: 'normal', brakeMessages10m: 10, cooldownSec: 0, maxPerHour: 0, botRounds: 2 });
     expect(resolveChatConfig(config, 'oc_quiet').participation)
-      .toEqual({ style: 'quiet', brakeMessages10m: 10, cooldownSec: 300, maxPerHour: 0 });
+      .toEqual({ style: 'quiet', brakeMessages10m: 10, cooldownSec: 300, maxPerHour: 0, botRounds: 2 });
     expect(() => fixture({ platform: 'feishu', feishu: FEISHU }, { oc_bad: { participation: { style: 'chatty' } } })).toThrow();
     expect(() => fixture({ platform: 'feishu', feishu: FEISHU }, { oc_bad: { participation: { maxPerHour: -1 } } })).toThrow();
   });

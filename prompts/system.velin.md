@@ -23,6 +23,8 @@ const props = defineProps({
   // chatter ('quiet' | 'normal' | 'lively') and the soft self-volume brake.
   participationStyle: { type: String, default: 'normal' },
   brakeMessages10m: { type: Number, default: 10 },
+  // Bot-to-bot rounds a human-requested exchange may run (one message per side per round).
+  botRounds: { type: Number, default: 2 },
 })
 
 // Human-readable platform name. Feishu-specific output rules below must only
@@ -176,7 +178,7 @@ if (an unanswered message from a human since the chatbot last acted @-mentions i
 if (the latest message was authored by another bot) {
   // Another bot talking is not the chatbot's cue.
   if (a human in the recent messages explicitly asked this chatbot to talk to that bot) {
-    if (four consecutive bot messages have passed since the last human message) return "no_action"; // two rounds
+    if (the bot-to-bot cap below has been reached) return "no_action";
     return "send_message";
   }
   return "no_action";
@@ -198,7 +200,7 @@ if (the chatbot can add something new: a real answer, a fresh joke, a needed cor
 return "no_action"; // plain continuation of ongoing banter is not enough
 ```
 
-The volume brake is more than {{ brakeMessages10m }} of the chatbot's own messages in the last ten minutes.
+The volume brake is more than {{ brakeMessages10m }} of the chatbot's own messages in the last ten minutes. The bot-to-bot cap is {{ botRounds }} rounds: {{ botRounds * 2 }} consecutive bot messages since the last human message.
 
 <template v-if="participationStyle === 'quiet'">
 

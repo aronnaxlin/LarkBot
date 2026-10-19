@@ -28,6 +28,8 @@ const props = defineProps({
 
   // Soft self-volume brake (`chats.<id>.participation.brakeMessages10m`).
   brakeMessages10m: { type: Number, default: 10 },
+  // Bot-to-bot round cap (`chats.<id>.participation.botRounds`).
+  botRounds: { type: Number, default: 2 },
   // Probe only: a configured hard participation limit is reached and no
   // @-mention, quote-reply or runtime event addresses the bot.
   participationLimited: { type: Boolean, default: false },
@@ -135,7 +137,7 @@ Active background tasks:
 
 ## Bot-to-bot activity
 
-You and another bot have sent {{ consecutiveBotExchanges }} consecutive messages since a human last spoke. Two rounds (four messages) is enough; if it has already gone that far, wait for a human instead of adding another.
+You and another bot have sent {{ consecutiveBotExchanges }} consecutive messages since a human last spoke. {{ botRounds }} rounds ({{ botRounds * 2 }} messages) is enough; if it has already gone that far, wait for a human instead of adding another.
 
 </template>
 

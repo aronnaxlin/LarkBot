@@ -27,7 +27,7 @@ export interface ParticipationStats {
   secondsSinceLastSelfMessage?: number;
   // Consecutive messages authored by bots since the last non-bot message. Zero
   // unless at least one of them came from another bot: the bot's own run of
-  // messages is not an exchange. Two bot↔bot rounds are roughly four
+  // messages is not an exchange. N bot↔bot rounds are roughly 2N
   // consecutive messages (one per side per round); senderless system/runtime
   // segments are skipped, not treated as humans.
   consecutiveBotExchanges: number;

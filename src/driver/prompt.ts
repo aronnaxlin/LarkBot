@@ -44,6 +44,7 @@ export const renderSystemPrompt = async (params: {
   // soft self-volume brake. Static per chat, so the prompt prefix stays cached.
   participationStyle?: 'quiet' | 'normal' | 'lively';
   brakeMessages10m?: number;
+  botRounds?: number;
 }) => {
   const { rendered } = await renderMarkdownString(systemPromptTemplate, params, basePath);
   return cleanVelinOutput(rendered);
@@ -65,6 +66,8 @@ export const renderLateBindingPrompt = async (params: {
   consecutiveBotExchanges?: number;
   // Soft self-volume brake threshold (messages in 10 minutes).
   brakeMessages10m?: number;
+  // Bot-to-bot round cap for a human-requested exchange.
+  botRounds?: number;
   // A hard participation limit is reached and nothing deterministic addresses
   // the bot: only a direct address may wake it.
   participationLimited?: boolean;

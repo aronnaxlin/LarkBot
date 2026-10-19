@@ -71,6 +71,8 @@ const BashMaintainerWindowSecSchema = v.pipe(v.number(), v.integer(), v.minValue
 const ParticipationStyleSchema = v.picklist(['quiet', 'normal', 'lively']);
 const BrakeMessages10mSchema = v.pipe(v.number(), v.integer(), v.minValue(1));
 const NonNegativeIntSchema = v.pipe(v.number(), v.integer(), v.minValue(0));
+// Bot-to-bot rounds a human-requested exchange may run before waiting for a human.
+const BotRoundsSchema = v.pipe(v.number(), v.integer(), v.minValue(1));
 
 // Number of newest turn responses whose provider reasoning is replayed.
 const ReasoningReplayTurnsSchema = v.pipe(v.number(), v.integer(), v.minValue(0));
@@ -105,6 +107,7 @@ const ChatConfigSchema = v.object({
     brakeMessages10m: v.optional(BrakeMessages10mSchema, 10),
     cooldownSec: v.optional(NonNegativeIntSchema, 0),
     maxPerHour: v.optional(NonNegativeIntSchema, 0),
+    botRounds: v.optional(BotRoundsSchema, 2),
   }), {}),
   imageToText: v.optional(v.object({
     enabled: v.optional(v.boolean(), false),
@@ -179,6 +182,7 @@ const ChatOverrideSchema = v.optional(v.partial(v.object({
     brakeMessages10m: BrakeMessages10mSchema,
     cooldownSec: NonNegativeIntSchema,
     maxPerHour: NonNegativeIntSchema,
+    botRounds: BotRoundsSchema,
   })),
   imageToText: v.partial(v.object({
     enabled: v.boolean(),
@@ -290,6 +294,7 @@ export interface ParticipationConfig {
   brakeMessages10m: number;
   cooldownSec: number;
   maxPerHour: number;
+  botRounds: number;
 }
 
 export interface ResolvedChatConfig {

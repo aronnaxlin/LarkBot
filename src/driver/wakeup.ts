@@ -187,6 +187,7 @@ export const executeWakeup = async (params: {
       shellMaintainerGated,
       participationStyle: participation.style,
       brakeMessages10m: participation.brakeMessages10m,
+      botRounds: participation.botRounds,
     });
     const entries = [...probeContext.entries];
     injectLateBindingPrompt(entries, await renderLateBindingPrompt({
@@ -276,6 +277,7 @@ export const executeWakeup = async (params: {
       shellMaintainerGated,
       participationStyle: participation.style,
       brakeMessages10m: participation.brakeMessages10m,
+      botRounds: participation.botRounds,
     });
     injectLateBindingPrompt(primaryContext.entries, await renderLateBindingPrompt({
       mode: 'primary',
@@ -287,6 +289,7 @@ export const executeWakeup = async (params: {
       ...(reactOnly ? { reactOnly: true } : {}),
       ...participationStats,
       brakeMessages10m: participation.brakeMessages10m,
+      botRounds: participation.botRounds,
     }));
     const tools = (reactOnly
       ? params.createTools().filter(tool => REACT_ONLY_TOOL_NAMES.has(tool.name))

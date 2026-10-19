@@ -73,6 +73,8 @@ const BrakeMessages10mSchema = v.pipe(v.number(), v.integer(), v.minValue(1));
 const NonNegativeIntSchema = v.pipe(v.number(), v.integer(), v.minValue(0));
 // Bot-to-bot rounds a human-requested exchange may run before waiting for a human.
 const BotRoundsSchema = v.pipe(v.number(), v.integer(), v.minValue(1));
+// Whether the bot may engage other bots without a human asking for it.
+const BotInteractionSchema = v.picklist(['requested', 'open']);
 
 // Number of newest turn responses whose provider reasoning is replayed.
 const ReasoningReplayTurnsSchema = v.pipe(v.number(), v.integer(), v.minValue(0));
@@ -108,6 +110,7 @@ const ChatConfigSchema = v.object({
     cooldownSec: v.optional(NonNegativeIntSchema, 0),
     maxPerHour: v.optional(NonNegativeIntSchema, 0),
     botRounds: v.optional(BotRoundsSchema, 2),
+    botInteraction: v.optional(BotInteractionSchema, 'requested'),
   }), {}),
   imageToText: v.optional(v.object({
     enabled: v.optional(v.boolean(), false),
@@ -183,6 +186,7 @@ const ChatOverrideSchema = v.optional(v.partial(v.object({
     cooldownSec: NonNegativeIntSchema,
     maxPerHour: NonNegativeIntSchema,
     botRounds: BotRoundsSchema,
+    botInteraction: BotInteractionSchema,
   })),
   imageToText: v.partial(v.object({
     enabled: v.boolean(),
@@ -295,6 +299,7 @@ export interface ParticipationConfig {
   cooldownSec: number;
   maxPerHour: number;
   botRounds: number;
+  botInteraction: 'requested' | 'open';
 }
 
 export interface ResolvedChatConfig {

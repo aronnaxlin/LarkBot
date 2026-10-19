@@ -51,7 +51,7 @@ const makeController = (rendered: ReturnType<typeof signal<RenderedContext>>) =>
       debounce: { initialDelayMs: 1, typingExtendMs: 1, maxDelayMs: 1 },
       compaction: { maxContextEstTokens: 1, workingWindowEstTokens: 1 },
       probe: { model: { apiBaseUrl: 'mock', apiKey: 'key', model: 'probe', apiFormat: 'openai-chat' }, timeoutMs: 1_000, contextEstTokens: 20_000, summaryMaxEstTokens: 20_000 },
-      participation: { style: 'normal', brakeMessages10m: 10, cooldownSec: 0, maxPerHour: 0, botRounds: 2 },
+      participation: { style: 'normal', brakeMessages10m: 10, cooldownSec: 0, maxPerHour: 0, botRounds: 2, botInteraction: 'requested' },
       imageToText: { enabled: false, maxConcurrency: 1 },
       animationToText: { enabled: false, maxFrames: 1, maxConcurrency: 1 },
       customEmojiToText: { enabled: false, maxFrames: 1, maxConcurrency: 1 },

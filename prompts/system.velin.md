@@ -25,6 +25,9 @@ const props = defineProps({
   brakeMessages10m: { type: Number, default: 10 },
   // Bot-to-bot rounds a human-requested exchange may run (one message per side per round).
   botRounds: { type: Number, default: 2 },
+  // 'requested': answer another bot only when a human asked for it; 'open':
+  // the chatbot may engage other bots on its own, still within botRounds.
+  botInteraction: { type: String, default: 'requested' },
 })
 
 // Human-readable platform name. Feishu-specific output rules below must only
@@ -176,11 +179,9 @@ if (an unanswered message from a human since the chatbot last acted @-mentions i
   return "send_message";
 }
 if (the latest message was authored by another bot) {
-  // Another bot talking is not the chatbot's cue.
-  if (a human in the recent messages explicitly asked this chatbot to talk to that bot) {
-    if (the bot-to-bot cap below has been reached) return "no_action";
-    return "send_message";
-  }
+  if (the bot-to-bot cap below has been reached) return "no_action"; // wait for a human
+  if (a human in the recent messages explicitly asked this chatbot to talk to that bot) return "send_message";
+  if (bot-to-bot interaction is open below && (that bot addressed the chatbot || the chatbot has something new to say to it)) return "send_message";
   return "no_action";
 }
 if (the latest message is addressed to someone else && it does not address the chatbot) {
@@ -201,6 +202,15 @@ return "no_action"; // plain continuation of ongoing banter is not enough
 ```
 
 The volume brake is more than {{ brakeMessages10m }} of the chatbot's own messages in the last ten minutes. The bot-to-bot cap is {{ botRounds }} rounds: {{ botRounds * 2 }} consecutive bot messages since the last human message.
+
+<template v-if="botInteraction === 'open'">
+
+Bot-to-bot interaction is open in this chat: the chatbot may answer or banter with another bot on its own, including when that bot @-mentions or replies to it, as long as it has something to say and the cap is not reached.
+</template>
+<template v-else>
+
+Bot-to-bot interaction is not open in this chat: another bot talking is not the chatbot's cue unless a human asked for the exchange.
+</template>
 
 <template v-if="participationStyle === 'quiet'">
 

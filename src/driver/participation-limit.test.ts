@@ -6,7 +6,7 @@ import type { RenderedContextSegment } from '../rendering/types';
 
 const NOW = 10_000_000;
 const config = (overrides: Partial<ParticipationConfig>): ParticipationConfig =>
-  ({ style: 'normal', brakeMessages10m: 10, cooldownSec: 0, maxPerHour: 0, botRounds: 2, ...overrides });
+  ({ style: 'normal', brakeMessages10m: 10, cooldownSec: 0, maxPerHour: 0, botRounds: 2, botInteraction: 'requested', ...overrides });
 const self = (receivedAtMs: number): RenderedContextSegment =>
   ({ receivedAtMs, senderId: 'bot', isMyself: true, content: [] });
 const human = (receivedAtMs: number, extra: Partial<RenderedContextSegment> = {}): RenderedContextSegment =>

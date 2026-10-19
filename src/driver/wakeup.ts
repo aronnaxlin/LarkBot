@@ -186,6 +186,7 @@ export const executeWakeup = async (params: {
       systemFiles: params.chatConfig.systemFiles,
       shellMaintainerGated,
       participationStyle: participation.style,
+      botInteraction: participation.botInteraction,
       brakeMessages10m: participation.brakeMessages10m,
       botRounds: participation.botRounds,
     });
@@ -276,6 +277,7 @@ export const executeWakeup = async (params: {
       systemFiles: params.chatConfig.systemFiles,
       shellMaintainerGated,
       participationStyle: participation.style,
+      botInteraction: participation.botInteraction,
       brakeMessages10m: participation.brakeMessages10m,
       botRounds: participation.botRounds,
     });

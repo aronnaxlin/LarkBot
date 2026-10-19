@@ -158,6 +158,8 @@ chats:
       maxPerHour: 0
       # Bot-to-bot rounds a human-requested exchange may run.
       botRounds: 2
+      # requested: answer another bot only when a human asks; open: engage on its own.
+      botInteraction: "requested"
     tools:
       # Enable per chat only; moderation policy belongs in that chat's systemFiles.
       banSpammer: false

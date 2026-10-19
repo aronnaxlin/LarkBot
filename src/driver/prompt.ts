@@ -45,6 +45,7 @@ export const renderSystemPrompt = async (params: {
   participationStyle?: 'quiet' | 'normal' | 'lively';
   brakeMessages10m?: number;
   botRounds?: number;
+  botInteraction?: 'requested' | 'open';
 }) => {
   const { rendered } = await renderMarkdownString(systemPromptTemplate, params, basePath);
   return cleanVelinOutput(rendered);

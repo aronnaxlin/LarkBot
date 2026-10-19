@@ -115,6 +115,9 @@ describe('participation tuning wording', () => {
     expect(normal).toContain('The bot-to-bot cap is 2 rounds: 4 consecutive bot messages');
     const five = await renderTemplate('system.velin.md', { mode: 'probe', ...SYSTEM_PROPS, botRounds: 5 });
     expect(five).toContain('The bot-to-bot cap is 5 rounds: 10 consecutive bot messages');
+    expect(normal).toContain('Bot-to-bot interaction is not open in this chat');
+    const open = await renderTemplate('system.velin.md', { mode: 'probe', ...SYSTEM_PROPS, botInteraction: 'open' });
+    expect(open).toContain('Bot-to-bot interaction is open in this chat');
   });
 
   it('puts a human direct address before the bot-author rule, and both before the volume brake', async () => {

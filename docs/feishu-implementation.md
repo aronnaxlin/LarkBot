@@ -19,7 +19,7 @@
 - 其他消息类型（文件、语音、视频、表情包、卡片、合并转发等）显示为 `[image]`、`[unsupported message type: x]` 这类占位文本，不带附件（图片除外，见 §1.1）。
 - 引用：`parent_id` 映射为 `replyToMessageId`。引用内容复用 Projection 的 IC 快照，只有父消息已在上下文中时才能显示；不另外调用 API 拉取父消息。
 - 撤回：`im.message.recalled_v1` 映射为 canonical `delete`。
-- 发送者身份：`CanonicalUser.id` 取 open_id（应用内稳定）；`isBot = sender_type !== 'user'`。昵称来源依次是通讯录 API（等待上限 1 秒，结果缓存 6 小时，失败后 10 分钟内不重试）、本进程见过的 @ 名字、IC 中的历史名字；都没有时为空，Rendering 回退显示 open_id。
+- 发送者身份：`CanonicalUser.id` 取 open_id（应用内稳定）；`isBot = sender_type !== 'user'`。昵称来源依次是通讯录 API（等待上限 1 秒，结果缓存 6 小时，失败后 10 分钟内不重试）；通讯录拿不到名字时，用本群成员列表（`im.v1.chatMembers.get`，只需群权限，也能覆盖通讯录范围外和外部成员，不含机器人；按群缓存 6 小时，等待上限同样 1 秒，列表里没有此人时 10 分钟后才重新拉取）；再往后是本进程见过的 @ 名字、IC 中的历史名字；都没有时为空，Rendering 回退显示 open_id。已存档消息保留当时的发送者快照，不会因为后来学到名字而改写（保持前缀缓存稳定）；需要给历史消息补名字时用 `contacts.json`。
 - 发送：`post` 消息，内容是单个 `md` 元素（CommonMark + GFM）；有 `reply_to` 时调用 reply 接口。
 - 发送 @：模型在 `send_message` 文本里写 `<at user_id="ou_...">名字</at>`，`src/feishu/post-content.ts` 校验后原样放进 `md` 元素（飞书 md 扩展语法）。open_id 必须是本群见过的参与者（本进程见过的发送者或被 @ 者，或 IC 中的历史发送者），否则工具报错；不支持 @所有人；代码块和行内代码里的标签按字面发送。飞书模式下 chatlog 的 `<message>` 带 `uid` 属性，供模型复制 open_id；Telegram 渲染不变。
 - Synthetic self-event：每次发送成功后，用服务端返回的 `message_id` 写入一条 `isSelfSent=true` 的 canonical 事件，再发布到 Pipeline，不唤醒 Driver。飞书不会把机器人自己的消息推回来，所以机器人只能通过这条路径看到自己说过的话。
@@ -99,7 +99,7 @@ chats:
 - 撤回事件：`im:message` 或 `im:message:readonly`。
 - 表情：`im:message.reactions:write_only`（或 `im:message`）。
 - 下载消息里的图片 / 文件资源（`read_image(file_id)`、`download_file`）：`im:resource`。缺这个权限时资源接口会返回权限错误；已在 2026-10-17 联机读取真实图片。
-- 昵称：通讯录读取权限（`contact.user.get`，如 `contact:user.base:readonly`）。该权限已开通，但还必须把「通讯录权限范围」（contact data range）配成包含群成员：范围外的成员返回 `41050` "no user authority"，此时昵称回退为早前见过的名字，再没有则显示 open_id。
+- 昵称：通讯录读取权限（`contact.user.get`，如 `contact:user.base:readonly`）。该权限已开通，但还必须把「通讯录权限范围」（contact data range）配成包含群成员：范围外的成员返回 `41050` "no user authority"，此时改用群成员列表的名字（见 §1），再没有才回退为早前见过的名字或 open_id。
 - 事件订阅方式选“长连接”，订阅 `im.message.receive_v1`、`im.message.recalled_v1`。
 - 一个应用只能运行一个长连接消费者：不要同时运行第二个 LarkBot 进程或 `lark-cli event consume`，否则事件会被随机分到其中一个。
 

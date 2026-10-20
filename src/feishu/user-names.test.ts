@@ -66,4 +66,65 @@ describe('createFeishuUserNames', () => {
     await names.resolve('oc_chat', 'ou_sender');
     expect(names.isKnown('oc_chat', 'ou_sender')).toBe(true);
   });
+  describe('chat member list fallback', () => {
+    const denied = async (): Promise<string | undefined> => {
+      throw new Error('code=41050');
+    };
+
+    it('names a sender the contact API cannot see, from one cached member-list fetch', async () => {
+      const fetchChatMemberNames = vi.fn(async () => new Map([['ou_liu', '刘宇泽'], ['ou_lu', '鹿饮']]));
+      const names = createFeishuUserNames({ fetchName: denied, fetchChatMemberNames, logger });
+      expect(await names.resolve('oc_chat', 'ou_liu')).toBe('刘宇泽');
+      expect(await names.resolve('oc_chat', 'ou_lu')).toBe('鹿饮');
+      expect(fetchChatMemberNames).toHaveBeenCalledTimes(1);
+    });
+
+    it('does not fetch the member list when the contact API has the name', async () => {
+      const fetchChatMemberNames = vi.fn(async () => new Map<string, string>());
+      const names = createFeishuUserNames({ fetchName: async () => 'Alice', fetchChatMemberNames, logger });
+      expect(await names.resolve('oc_chat', 'ou_alice')).toBe('Alice');
+      expect(fetchChatMemberNames).not.toHaveBeenCalled();
+    });
+
+    it('refetches for an unlisted sender only after the miss backoff', async () => {
+      let clock = 0;
+      let members = new Map([['ou_old', 'Old']]);
+      const fetchChatMemberNames = vi.fn(async () => members);
+      const names = createFeishuUserNames({
+        fetchName: denied, fetchChatMemberNames, logger, now: () => clock, memberMissBackoffMs: 100, failureBackoffMs: 1000,
+      });
+      expect(await names.resolve('oc_chat', 'ou_new')).toBe('');
+      clock = 50;
+      expect(await names.resolve('oc_chat', 'ou_new')).toBe('');
+      expect(fetchChatMemberNames).toHaveBeenCalledTimes(1);
+      members = new Map([['ou_old', 'Old'], ['ou_new', 'New']]);
+      clock = 2000;
+      expect(await names.resolve('oc_chat', 'ou_new')).toBe('New');
+      expect(fetchChatMemberNames).toHaveBeenCalledTimes(2);
+    });
+
+    it('keeps chats separate and degrades to empty when the member list fails', async () => {
+      const fetchChatMemberNames = vi.fn(async (chatId: string) => {
+        if (chatId === 'oc_b') throw new Error('code=232011');
+        return new Map([['ou_x', 'X in A']]);
+      });
+      const names = createFeishuUserNames({ fetchName: denied, fetchChatMemberNames, logger });
+      expect(await names.resolve('oc_a', 'ou_x')).toBe('X in A');
+      expect(await names.resolve('oc_b', 'ou_y')).toBe('');
+      expect(fetchChatMemberNames).toHaveBeenCalledTimes(2);
+    });
+
+    it('bounds the wait for a slow member list and uses the result next time', async () => {
+      let finish: (names: Map<string, string>) => void = () => {};
+      const fetchChatMemberNames = vi.fn(() => new Promise<Map<string, string>>(resolve => {
+        finish = resolve;
+      }));
+      const names = createFeishuUserNames({ fetchName: denied, fetchChatMemberNames, logger, lookupTimeoutMs: 10 });
+      expect(await names.resolve('oc_chat', 'ou_slow')).toBe('');
+      finish(new Map([['ou_slow', 'Slow']]));
+      await new Promise<void>(resolve => setTimeout(resolve, 0));
+      expect(await names.resolve('oc_chat', 'ou_slow')).toBe('Slow');
+      expect(fetchChatMemberNames).toHaveBeenCalledTimes(1);
+    });
+  });
 });

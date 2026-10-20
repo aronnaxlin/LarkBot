@@ -122,6 +122,23 @@ export const createFeishuSdk = (credentials: FeishuCredentials, logger: Logger) 
       const name = response.data?.user?.name;
       return name === '' ? undefined : name;
     },
+    listChatMemberNames: async chatId => {
+      const names = new Map<string, string>();
+      let pageToken: string | undefined;
+      // Bounded: a group has at most a few thousand members, 100 per page.
+      for (let page = 0; page < 50; page++) {
+        const response = await call('chat.members.get', () => client.im.v1.chatMembers.get({
+          path: { chat_id: chatId },
+          params: { member_id_type: 'open_id', page_size: 100, ...(pageToken ? { page_token: pageToken } : {}) },
+        }));
+        for (const member of response.data?.items ?? []) {
+          if (member.member_id && member.name) names.set(member.member_id, member.name);
+        }
+        if (!response.data?.has_more || !response.data.page_token) break;
+        pageToken = response.data.page_token;
+      }
+      return names;
+    },
     sendPost: async ({ chatId, replyToMessageId, content, uuid }) => {
       const operation = replyToMessageId ? 'message.reply' : 'message.create';
       const response = replyToMessageId

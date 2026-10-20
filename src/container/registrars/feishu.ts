@@ -25,6 +25,7 @@ export const registerFeishu = ({ get, register }: Registrar): void => {
     const pipeline = get(TOKENS.PIPELINE);
     return createFeishuUserNames({
       fetchName: get(TOKENS.FEISHU_SDK).api.getUserName,
+      fetchChatMemberNames: get(TOKENS.FEISHU_SDK).api.listChatMemberNames,
       fallbackName: (chatId, openId) => pipeline.getIC(chatId)?.users.get(openId)?.user.displayName,
       logger: get(TOKENS.LOGGER),
     });

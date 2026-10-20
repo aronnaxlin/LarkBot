@@ -7,6 +7,9 @@ export interface FeishuApi {
   getBotInfo(): Promise<{ openId: string; name: string }>;
   // Contact display name; undefined when the contact has no visible name.
   getUserName(openId: string): Promise<string | undefined>;
+  // open_id → name of every human member of a group chat (Feishu omits bots).
+  // Needs only the chat scope, so it also names members the contact API can't.
+  listChatMemberNames(chatId: string): Promise<Map<string, string>>;
   // Sends one `post` message, as a quoted reply when replyToMessageId is set.
   // `uuid` makes retries of the same logical send idempotent server-side.
   sendPost(params: {

@@ -20,7 +20,7 @@ import { toResponsesInput } from './to-responses-input';
 const normalize = (val: unknown): unknown => {
   if (val === null || val === undefined) return val;
   if (typeof val === 'string') {
-    const replaced = val.replace(/^(data:[^;]+;base64,).+$/, '$1<IMAGE_DATA>');
+    const replaced = val.replace(/^data:image\/[^;]+;base64,.+$/, 'data:image/<FORMAT>;base64,<IMAGE_DATA>');
     if (replaced !== val) return replaced;
     try {
       const parsed: unknown = JSON.parse(val);

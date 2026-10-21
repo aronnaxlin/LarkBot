@@ -55,11 +55,6 @@ export const applyExtra = <T extends Record<string, unknown>>(
   return { ...extraFields, ...core };
 };
 
-export const requireImageFormat = (format: string | undefined): string => {
-  if (format === undefined) throw new Error('Image has no recognizable format');
-  return format;
-};
-
 export const assertSystemTextOnly = (msg: { role: string; parts: { kind: string }[] }): void => {
   if (msg.role === 'system' && msg.parts.some(p => p.kind !== 'text')) {
     throw new Error('System message parts must be text');
@@ -72,6 +67,7 @@ interface EncodedImage {
 }
 
 const MAX_EDGE: Record<'low' | 'high', number> = { low: 512, high: 1024 };
+const JPEG_QUALITY = 80;
 
 const encodeCache = new WeakMap<Sharp, Map<'low' | 'high', Promise<EncodedImage>>>();
 
@@ -91,8 +87,12 @@ export const sharpToEncoded = (part: ImagePart): Promise<EncodedImage> => {
       fit: 'inside',
       withoutEnlargement: true,
     });
-    const [buf, meta] = await Promise.all([resized.toBuffer(), resized.metadata()]);
-    return { buf, format: requireImageFormat(meta.format) };
+    // JPEG instead of the source format: a 1024px read_image result kept as
+    // PNG cost ~0.9 MB of base64 and is re-sent on every wake-up while it stays
+    // in context (2026-10-20: two images made a 1.8 MB primary request).
+    // Alpha is flattened onto white because JPEG has no transparency.
+    const buf = await resized.flatten({ background: '#ffffff' }).jpeg({ quality: JPEG_QUALITY }).toBuffer();
+    return { buf, format: 'jpeg' };
   })();
   perImage.set(detail, promise);
   return promise;

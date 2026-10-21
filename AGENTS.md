@@ -208,7 +208,7 @@ Token semantics are uniform:
 
 `src/media/` owns all provider/platform-neutral processing. Telegram only supplies bytes and metadata.
 
-- Passive image alt text: thumbnail WebP hash is the cache key; model input is PNG <=512px. Explicit `read_image(detail="high")` may use 1024px.
+- Passive image alt text: thumbnail WebP hash is the cache key; model input is JPEG (quality 80, alpha flattened onto white) <=512px; explicit `read_image(detail="high")` may use 1024px. Every image part is re-encoded as JPEG at the wire boundary (`sharpToEncoded`), because base64 PNGs kept in context were re-sent on every wake-up.
 - Animations/stickers: file SHA-256 is the key; frames are count-based/equidistant; gzip magic identifies TGS; files over 20 MB fail.
 - Custom emoji: cache key is `emoji:<id>`; the bot client supplies media bytes.
 

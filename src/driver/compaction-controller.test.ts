@@ -11,6 +11,7 @@ import { runCompaction } from './compaction';
 import { COMPACTION_RETRY_BASE_MS, createCompactionController } from './compaction-controller';
 import { DEFAULT_TURN_BUDGET } from './turn-loop';
 import type { CompactionSessionMeta } from './types';
+import { DEFAULT_MEMORY_CONFIG } from '../memory/types';
 import type { RenderedContext } from '../rendering/types';
 
 initLogger(LogLevel.Error, Format.Pretty);
@@ -52,6 +53,7 @@ const makeController = (rendered: ReturnType<typeof signal<RenderedContext>>) =>
       compaction: { maxContextEstTokens: 1, workingWindowEstTokens: 1 },
       probe: { model: { apiBaseUrl: 'mock', apiKey: 'key', model: 'probe', apiFormat: 'openai-chat' }, timeoutMs: 1_000, contextEstTokens: 20_000, summaryMaxEstTokens: 20_000 },
       participation: { style: 'normal', brakeMessages10m: 10, cooldownSec: 0, maxPerHour: 0, botRounds: 2, botInteraction: 'requested' },
+      memory: DEFAULT_MEMORY_CONFIG,
       imageToText: { enabled: false, maxConcurrency: 1 },
       animationToText: { enabled: false, maxFrames: 1, maxConcurrency: 1 },
       customEmojiToText: { enabled: false, maxFrames: 1, maxConcurrency: 1 },

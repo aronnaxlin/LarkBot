@@ -162,6 +162,7 @@ export const registerDriver = ({ get, register }: Registrar): void => {
           ? messageAlias(chatId, messageId)
           : messageId,
       resolveModel: name => resolveModel(config, name),
+      memory: get(TOKENS.MEMORY_DEPS),
       backgroundTask: {
         startTask: (typeName, sessionId, params, intention, timeoutMs) =>
           backgroundTasks.startTask(typeName, sessionId, params, intention, timeoutMs),

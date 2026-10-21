@@ -9,6 +9,8 @@ import type { EventSink } from '../event-sink';
 import type { FeishuBotIdentity, FeishuIngress, FeishuSdk } from '../feishu';
 import type { createFeishuUserNames } from '../feishu/user-names';
 import type { MediaRuntime } from '../media/runtime';
+import type { MemoryDeps } from '../memory/deps';
+import type { MemoryBackend } from '../memory/types';
 import type { createPipeline } from '../pipeline';
 import type { PlatformIdentity, PlatformRuntime } from '../startup/platform';
 import type { TelegramDriverHooks, TelegramLiveHandlers, TelegramManager, TelegramPostStartupTasks } from '../telegram';
@@ -37,6 +39,8 @@ export const TOKENS = {
   MEDIA_RUNTIME: token<MediaRuntime>('MediaRuntime'),
   TELEGRAM_MANAGER: token<TelegramManager>('TelegramManager'),
   PIPELINE: token<ReturnType<typeof createPipeline>>('Pipeline'),
+  MEMORY_BACKEND: token<MemoryBackend>('MemoryBackend'),
+  MEMORY_DEPS: token<MemoryDeps>('MemoryDeps'),
   DRIVER_INPUT_BUS: token<DriverInputBus>('DriverInputBus'),
   EVENT_SINK: token<EventSink>('EventSink'),
   TELEGRAM_DRIVER_HOOKS: token<TelegramDriverHooks>('TelegramDriverHooks'),

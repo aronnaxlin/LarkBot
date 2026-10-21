@@ -10,6 +10,8 @@ import type { CompactionConfig, DebounceConfig, TurnBudget } from '../driver/typ
 import type { WebFetchConfig } from '../driver/web-fetch/types';
 import type { WebSearchConfig } from '../driver/web-search/types';
 import type { LlmEndpoint } from '../llm/types';
+import { DEFAULT_MEMORY_CONFIG } from '../memory/types';
+import type { MemoryConfig } from '../memory/types';
 
 const llmEndpointEntries = {
   apiBaseUrl: v.string(),
@@ -79,6 +81,14 @@ const BotInteractionSchema = v.picklist(['requested', 'open']);
 // Number of newest turn responses whose provider reasoning is replayed.
 const ReasoningReplayTurnsSchema = v.pipe(v.number(), v.integer(), v.minValue(0));
 
+// Person-memory knobs (see AGENTS.md "Person Memory"). Cross-field rules between
+// the budgets are checked on the merged chat config in validateConfig.
+const MemoryCharsSchema = v.pipe(v.number(), v.integer(), v.minValue(100));
+const MemoryCountSchema = v.pipe(v.number(), v.integer(), v.minValue(1));
+// Below 5 human messages the consolidator would skip every run anyway.
+const MemoryTriggerMessagesSchema = v.pipe(v.number(), v.integer(), v.minValue(5));
+const MemoryNonNegativeIntSchema = v.pipe(v.number(), v.integer(), v.minValue(0));
+
 const ChatConfigSchema = v.object({
   primary: v.optional(v.object({
     model: v.optional(v.string(), 'primary'),
@@ -103,6 +113,22 @@ const ChatConfigSchema = v.object({
     timeoutMs: v.optional(ProbeTimeoutMsSchema, DEFAULT_PROBE_TIMEOUT_MS),
     contextEstTokens: v.optional(ProbeContextEstTokensSchema, 20000),
     summaryMaxEstTokens: v.optional(ProbeSummaryMaxEstTokensSchema, 20000),
+  }), {}),
+  memory: v.optional(v.object({
+    enabled: v.optional(v.boolean(), DEFAULT_MEMORY_CONFIG.enabled),
+    inject: v.optional(v.boolean(), DEFAULT_MEMORY_CONFIG.inject),
+    model: v.optional(v.pipe(v.string(), v.minLength(1))),
+    triggerMessages: v.optional(MemoryTriggerMessagesSchema, DEFAULT_MEMORY_CONFIG.triggerMessages),
+    maxWindowMessages: v.optional(MemoryCountSchema, DEFAULT_MEMORY_CONFIG.maxWindowMessages),
+    cardMaxChars: v.optional(MemoryCharsSchema, DEFAULT_MEMORY_CONFIG.cardMaxChars),
+    selfMaxChars: v.optional(MemoryCharsSchema, DEFAULT_MEMORY_CONFIG.selfMaxChars),
+    hearsayMaxEntries: v.optional(MemoryNonNegativeIntSchema, DEFAULT_MEMORY_CONFIG.hearsayMaxEntries),
+    hearsayMaxChars: v.optional(MemoryCountSchema, DEFAULT_MEMORY_CONFIG.hearsayMaxChars),
+    injectionMaxChars: v.optional(MemoryCharsSchema, DEFAULT_MEMORY_CONFIG.injectionMaxChars),
+    selfInjectionChars: v.optional(MemoryCharsSchema, DEFAULT_MEMORY_CONFIG.selfInjectionChars),
+    lookbackMessages: v.optional(MemoryCountSchema, DEFAULT_MEMORY_CONFIG.lookbackMessages),
+    recentSpeakers: v.optional(MemoryCountSchema, DEFAULT_MEMORY_CONFIG.recentSpeakers),
+    doNotReadd: v.optional(MemoryNonNegativeIntSchema, DEFAULT_MEMORY_CONFIG.doNotReadd),
   }), {}),
   participation: v.optional(v.object({
     style: v.optional(ParticipationStyleSchema, 'normal'),
@@ -179,6 +205,22 @@ const ChatOverrideSchema = v.optional(v.partial(v.object({
     timeoutMs: ProbeTimeoutMsSchema,
     contextEstTokens: ProbeContextEstTokensSchema,
     summaryMaxEstTokens: ProbeSummaryMaxEstTokensSchema,
+  })),
+  memory: v.partial(v.object({
+    enabled: v.boolean(),
+    inject: v.boolean(),
+    model: v.pipe(v.string(), v.minLength(1)),
+    triggerMessages: MemoryTriggerMessagesSchema,
+    maxWindowMessages: MemoryCountSchema,
+    cardMaxChars: MemoryCharsSchema,
+    selfMaxChars: MemoryCharsSchema,
+    hearsayMaxEntries: MemoryNonNegativeIntSchema,
+    hearsayMaxChars: MemoryCountSchema,
+    injectionMaxChars: MemoryCharsSchema,
+    selfInjectionChars: MemoryCharsSchema,
+    lookbackMessages: MemoryCountSchema,
+    recentSpeakers: MemoryCountSchema,
+    doNotReadd: MemoryNonNegativeIntSchema,
   })),
   participation: v.partial(v.object({
     style: ParticipationStyleSchema,
@@ -280,6 +322,12 @@ const ConfigSchema = v.object({
   database: v.optional(v.object({
     path: v.optional(v.string(), './data/cahciua.db'),
   }), {}),
+  /**
+   * Root of the person-memory Markdown store (`<memoryDir>/<chatId>/...`). Must
+   * sit under the writable data volume; the global key keeps it apart from the
+   * per-chat `memory` section.
+   */
+  memoryDir: v.optional(v.string(), './data/memory'),
   runtime: RuntimeSchema,
   backgroundTasks: BackgroundTasksSchema,
   chats: v.objectWithRest({ default: ChatConfigSchema }, ChatOverrideSchema),
@@ -311,6 +359,7 @@ export interface ResolvedChatConfig {
   compaction: CompactionConfig;
   probe: { model: LlmEndpoint; timeoutMs: number; contextEstTokens: number; summaryMaxEstTokens: number };
   participation: ParticipationConfig;
+  memory: MemoryConfig;
   imageToText: { enabled: boolean; model?: string; maxConcurrency: number };
   animationToText: { enabled: boolean; model?: string; maxFrames: number; maxConcurrency: number };
   customEmojiToText: { enabled: boolean; model?: string; maxFrames: number; maxConcurrency: number };
@@ -339,12 +388,31 @@ const resolveTurnBudget = (chatId: string, merged: ChatConfig): TurnBudget => {
   return budget;
 };
 
+// Memory budgets must leave every injected card a meaningful share and keep the
+// write path able to hold what it is asked to write.
+const validateMemory = (chatId: string, memory: ChatConfig['memory']): void => {
+  const fail = (rule: string): never => {
+    throw new Error(`Chat ${chatId}: memory ${rule}`);
+  };
+  if (memory.injectionMaxChars < memory.selfInjectionChars)
+    fail(`injectionMaxChars (${memory.injectionMaxChars}) must be >= selfInjectionChars (${memory.selfInjectionChars})`);
+  if (memory.injectionMaxChars < memory.recentSpeakers * 200)
+    fail(`injectionMaxChars (${memory.injectionMaxChars}) must be >= recentSpeakers * 200 (${memory.recentSpeakers * 200})`);
+  // At least half a full card must be shown per speaker, or eviction pressure
+  // on the cards is constant and most of what is stored is never seen.
+  if (memory.injectionMaxChars / memory.recentSpeakers < memory.cardMaxChars / 2)
+    fail(`injectionMaxChars / recentSpeakers (${memory.injectionMaxChars / memory.recentSpeakers}) must be >= cardMaxChars / 2 (${memory.cardMaxChars / 2})`);
+  if (memory.maxWindowMessages < memory.triggerMessages)
+    fail(`maxWindowMessages (${memory.maxWindowMessages}) must be >= triggerMessages (${memory.triggerMessages})`);
+};
+
 // Cross-field rules the schema cannot express.
 const validateConfig = (config: Config): void => {
   const maintainers = new Set(config.maintainers);
   for (const chatId of getChatIds(config)) {
     const merged = mergeChatConfig(config, chatId);
     resolveTurnBudget(chatId, merged);
+    validateMemory(chatId, merged.memory);
     // A blocked maintainer would render as blocked, silently hiding the trusted
     // flag; reject the ambiguous config instead of picking a precedence.
     const blockedMaintainer = merged.blockedUserIds.find(id => maintainers.has(id));
@@ -463,6 +531,10 @@ export const resolveChatConfig = (config: Config, chatId: string): ResolvedChatC
       summaryMaxEstTokens: merged.probe.summaryMaxEstTokens,
     },
     participation: { ...merged.participation },
+    memory: {
+      ...merged.memory,
+      model: merged.memory.model ? resolveModel(config, merged.memory.model) : undefined,
+    },
     imageToText: {
       enabled: merged.imageToText.enabled,
       model: merged.imageToText.model,

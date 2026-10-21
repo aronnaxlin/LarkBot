@@ -13,6 +13,7 @@ import { interruptedChainUsage } from './wakeup';
 import type { ResolvedChatConfig } from '../config/config';
 import type { LlmCallUsage } from '../llm/call';
 import { callLlm } from '../llm/call';
+import { DEFAULT_MEMORY_CONFIG } from '../memory/types';
 import type { RenderedContext } from '../rendering/types';
 import type { ConversationEntry } from '../unified-api/types';
 
@@ -54,6 +55,7 @@ const makeChatConfig = (): ResolvedChatConfig => ({
     summaryMaxEstTokens: 20000,
   },
   participation: { style: 'normal', brakeMessages10m: 10, cooldownSec: 0, maxPerHour: 0, botRounds: 2, botInteraction: 'requested' },
+  memory: DEFAULT_MEMORY_CONFIG,
   imageToText: { enabled: false, maxConcurrency: 1 },
   animationToText: { enabled: false, maxFrames: 0, maxConcurrency: 1 },
   customEmojiToText: { enabled: false, maxFrames: 0, maxConcurrency: 1 },

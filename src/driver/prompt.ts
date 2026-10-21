@@ -26,6 +26,8 @@ const systemPromptTemplate = readFileSync(resolve(__dirname, '../../prompts/syst
 const lateBindingTemplate = readFileSync(resolve(__dirname, '../../prompts/late-binding.velin.md'), 'utf-8');
 const compactionSystemTemplate = readFileSync(resolve(__dirname, '../../prompts/compaction-system.velin.md'), 'utf-8');
 const compactionUserTemplate = readFileSync(resolve(__dirname, '../../prompts/compaction-late-binding.velin.md'), 'utf-8');
+const memorySystemTemplate = readFileSync(resolve(__dirname, '../../prompts/memory-system.velin.md'), 'utf-8');
+const memoryUserTemplate = readFileSync(resolve(__dirname, '../../prompts/memory-user.velin.md'), 'utf-8');
 
 export type PromptMode = 'primary' | 'probe';
 // Chat platform, matching DriverPlatform['name'].
@@ -46,6 +48,9 @@ export const renderSystemPrompt = async (params: {
   brakeMessages10m?: number;
   botRounds?: number;
   botInteraction?: 'requested' | 'open';
+  // Person memory is injected into this chat's prompts. Gates the "Your notes"
+  // paragraph; absent/false renders a byte-identical prompt.
+  memoryEnabled?: boolean;
 }) => {
   const { rendered } = await renderMarkdownString(systemPromptTemplate, params, basePath);
   return cleanVelinOutput(rendered);
@@ -72,9 +77,16 @@ export const renderLateBindingPrompt = async (params: {
   // A hard participation limit is reached and nothing deterministic addresses
   // the bot: only a direct address may wake it.
   participationLimited?: boolean;
+  // Pre-rendered person-memory block (src/memory/injection.ts). Appended after
+  // the template output instead of interpolated into it: Velin collapses the
+  // newlines of interpolated strings and escapes markdown characters, which
+  // would mangle the entries.
+  memoryXml?: string;
 }) => {
-  const { rendered } = await renderMarkdownString(lateBindingTemplate, params, basePath);
-  return cleanVelinOutput(rendered);
+  const { memoryXml, ...templateParams } = params;
+  const { rendered } = await renderMarkdownString(lateBindingTemplate, templateParams, basePath);
+  const prompt = cleanVelinOutput(rendered);
+  return memoryXml ? `${prompt}\n\n${memoryXml}` : prompt;
 };
 
 export const renderCompactionSystemPrompt = async () => {
@@ -84,5 +96,21 @@ export const renderCompactionSystemPrompt = async () => {
 
 export const renderCompactionUserInstruction = async () => {
   const { rendered } = await renderMarkdownString(compactionUserTemplate, {}, basePath);
+  return cleanVelinOutput(rendered);
+};
+
+export const renderMemorySystemPrompt = async (params: {
+  cardMaxChars: number;
+  selfMaxChars: number;
+  hearsayMaxEntries: number;
+  hearsayMaxChars: number;
+  hearsayPrefix: string;
+}) => {
+  const { rendered } = await renderMarkdownString(memorySystemTemplate, params, basePath);
+  return cleanVelinOutput(rendered);
+};
+
+export const renderMemoryUserInstruction = async (params: { currentDate: string }) => {
+  const { rendered } = await renderMarkdownString(memoryUserTemplate, params, basePath);
   return cleanVelinOutput(rendered);
 };

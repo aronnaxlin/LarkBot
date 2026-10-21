@@ -95,6 +95,9 @@ export const events = sqliteTable('events', {
   dedupKey: text('dedup_key'),
 }, table => [
   index('events_chat_id_idx').on(table.chatId),
+  // Serves the person-memory volume trigger and window queries, which filter a
+  // chat by received_at instead of scanning its whole archive.
+  index('events_chat_received_idx').on(table.chatId, table.receivedAtMs),
   uniqueIndex('events_chat_dedup_idx').on(table.chatId, table.dedupKey),
 ]);
 
@@ -165,6 +168,16 @@ export const compactions = sqliteTable('compactions', {
 }, table => [
   index('compactions_chat_id_idx').on(table.chatId),
 ]);
+
+// Person-memory progress: how far the consolidator has processed the archive.
+// Separate from `compactions`, whose cursor is ahead of what memory has seen.
+export const memoryCursors = sqliteTable('memory_cursors', {
+  chatId: text('chat_id').primaryKey(),
+  cursorMs: integer('cursor_ms').notNull().default(0),
+  lastRunMs: integer('last_run_ms'),
+  lastError: text('last_error'),
+  updatedAt: integer('updated_at').notNull(),
+});
 
 export const probeResponses = sqliteTable('probe_responses', {
   id: integer('id').primaryKey({ autoIncrement: true }),

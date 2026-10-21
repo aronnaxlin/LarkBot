@@ -14,6 +14,8 @@ import { executeWakeup } from './wakeup';
 import type { ActiveTaskInfo } from '../background-task/types';
 import type { RuntimeConfig } from '../config/config';
 import type { LlmEndpoint } from '../llm/types';
+import { createChatMemory } from '../memory/chat-memory';
+import type { MemoryDeps } from '../memory/deps';
 import type { RenderedContext } from '../rendering/types';
 
 export { mergeContext } from './merge';
@@ -42,6 +44,9 @@ export const createDriver = (config: DriverConfig, deps: DriverPlatform & {
   // echo a message id back to the model.
   formatMessageId?: (chatId: string, messageId: string) => string;
   resolveModel: (name: string) => LlmEndpoint;
+  // Person memory (backend + DB closures). Absent, or disabled for a chat,
+  // leaves that chat's prompts and behaviour exactly as without memory.
+  memory?: MemoryDeps;
   backgroundTask: {
     startTask: (typeName: string, sessionId: string, params: unknown, intention: string | undefined, timeoutMs: number) => number;
     killTask: (taskId: number) => { ok: boolean; error?: string };
@@ -99,6 +104,14 @@ export const createDriver = (config: DriverConfig, deps: DriverPlatform & {
       log,
     });
     const { cursorMs, summary } = compaction;
+    const memory = createChatMemory({
+      chatId,
+      chatConfig,
+      deps: deps.memory,
+      context: rc,
+      compactionMeta,
+      log,
+    });
     const runner = createRunner({
       apiBaseUrl: chatConfig.primary.model.apiBaseUrl,
       apiKey: chatConfig.primary.model.apiKey,
@@ -163,6 +176,8 @@ export const createDriver = (config: DriverConfig, deps: DriverPlatform & {
             probeActivation,
             onProbeActivated: activation => { probeActivation = activation; },
             probeWindow,
+            memoryEnabled: memory.injecting,
+            loadMemorySnapshot: memory.loadSnapshot,
             log,
           });
           return { kind: 'done' };
@@ -184,6 +199,7 @@ export const createDriver = (config: DriverConfig, deps: DriverPlatform & {
     const cleanup = () => {
       scheduler.dispose();
       compaction.dispose();
+      memory.dispose();
     };
 
     const entry = { rc, notifyTyping: scheduler.notifyTyping, cleanup };

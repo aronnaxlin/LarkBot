@@ -52,6 +52,11 @@ telegram:
 database:
   path: "./data/cahciua.db"
 
+# Person memory (docs/memory-design.md): Markdown cards per member under
+# <memoryDir>/<chatId>/. Must sit under the writable data volume; enable it per
+# chat with chats.<id>.memory below.
+memoryDir: "./data/memory"
+
 runtime:
   # Where the Bash tool executes. These defaults run shell commands in the bot
   # process itself and read/write files on its filesystem — no isolation — so
@@ -128,6 +133,28 @@ chats:
       # took about 2 minutes live, so give its model entry timeoutSec >= 300
       # (the primary model's own timeoutSec is separate).
       # model: "primary"
+
+    # Per-person long-term memory (docs/memory-design.md). A background
+    # consolidator writes evidence-backed cards from the chat archive and the
+    # latest speakers' cards are injected into the late-binding prompt. Off by
+    # default; start in shadow mode (enabled: true, inject: false) and inspect
+    # the cards before injecting them.
+    memory:
+      enabled: false
+      inject: true # false = write cards, inject nothing (shadow mode)
+      # Omit to reuse compaction.model, then the primary endpoint.
+      # model: "primary"
+      triggerMessages: 40 # human messages since the cursor (>= 5)
+      maxWindowMessages: 200 # cap one consolidation batch and the first window
+      cardMaxChars: 1200 # per person card
+      selfMaxChars: 1000 # SELF.md
+      hearsayMaxEntries: 3 # third-party "群里的说法：" entries per card
+      hearsayMaxChars: 500
+      injectionMaxChars: 4000 # all person cards in one prompt
+      selfInjectionChars: 800 # SELF.md in one prompt
+      lookbackMessages: 30 # recent chat scanned for whose cards to inject
+      recentSpeakers: 4 # cards injected at most
+      doNotReadd: 20 # recent forgotten facts fed back to the writer
 
     imageToText:
       enabled: false

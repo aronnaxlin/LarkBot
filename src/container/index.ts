@@ -7,6 +7,7 @@ import { registerCore } from './registrars/core';
 import { registerDriver } from './registrars/driver';
 import { registerFeishu } from './registrars/feishu';
 import { registerMedia } from './registrars/media';
+import { registerMemory } from './registrars/memory';
 import { registerPersistence } from './registrars/persistence';
 import { registerPipeline } from './registrars/pipeline';
 import { registerPlatform } from './registrars/platform';
@@ -21,6 +22,7 @@ const registrars = [
   registerPlatform,
   registerMedia,
   registerPipeline,
+  registerMemory,
   registerDriver,
 ] as const;
 

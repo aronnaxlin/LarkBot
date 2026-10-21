@@ -14,6 +14,7 @@ import { countParticipationCalls, countWorkToolCalls, DEFAULT_TURN_BUDGET, REACT
 import type { ProbeActivation, ProbeResponseV2, ResolvedChatConfig, TurnBudget, TurnBudgetUsage, TurnResponseV2 } from './types';
 import type { ActiveTaskInfo } from '../background-task/types';
 import { callLlm } from '../llm/call';
+import type { MemorySnapshot } from '../memory/injection';
 import type { RenderedContext } from '../rendering/types';
 
 const localTimeNow = (): string => {
@@ -71,6 +72,11 @@ export const executeWakeup = async (params: {
   // Per-chat probe window start, carried across wake-ups so the probe prefix
   // stays stable between hysteresis jumps. Mutated in place by the probe call.
   probeWindow?: ProbeWindowState;
+  // Person memory. The snapshot is read once, before the probe, and rendered
+  // into both late-binding prompts, so a write mid-turn cannot split the probe's
+  // view from primary's. Absent or null leaves every prompt untouched.
+  memoryEnabled?: boolean;
+  loadMemorySnapshot?: (context: RenderedContext) => MemorySnapshot | null;
   // Set when retrying this context after primary failed transiently: probe
   // already activated it, so judging again would only add latency.
   probeActivation?: ProbeActivation;
@@ -128,6 +134,8 @@ export const executeWakeup = async (params: {
   // messages here even when the prompt pipeline trims ones covered by tool
   // calls. Shared by the probe and primary late-binding prompts.
   const participationStats = computeParticipationStats({ segments: params.contextAtStart, nowMs: Date.now() });
+  const memorySnapshot = params.loadMemorySnapshot?.(params.contextAtStart) ?? null;
+  const memoryEnabled = params.memoryEnabled === true;
   let probeReason: string | undefined;
   let reactOnly = params.probeActivation?.reactOnly ?? false;
 
@@ -198,6 +206,7 @@ export const executeWakeup = async (params: {
       activeBackgroundTasks: backgroundTasks,
       ...participationStats,
       ...(addressOnly ? { participationLimited: true } : {}),
+      ...(memorySnapshot?.probeXml ? { memoryXml: memorySnapshot.probeXml } : {}),
     }));
 
     const decideTool = createDecideTool();
@@ -280,6 +289,7 @@ export const executeWakeup = async (params: {
       botInteraction: participation.botInteraction,
       brakeMessages10m: participation.brakeMessages10m,
       botRounds: participation.botRounds,
+      ...(memoryEnabled ? { memoryEnabled: true } : {}),
     });
     injectLateBindingPrompt(primaryContext.entries, await renderLateBindingPrompt({
       mode: 'primary',
@@ -292,6 +302,7 @@ export const executeWakeup = async (params: {
       ...participationStats,
       brakeMessages10m: participation.brakeMessages10m,
       botRounds: participation.botRounds,
+      ...(memorySnapshot?.primaryXml ? { memoryXml: memorySnapshot.primaryXml } : {}),
     }));
     const tools = (reactOnly
       ? params.createTools().filter(tool => REACT_ONLY_TOOL_NAMES.has(tool.name))

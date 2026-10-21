@@ -11,6 +11,7 @@ import { DEFAULT_TURN_BUDGET } from './turn-loop';
 import type { TurnResponseV2 } from './types';
 import type { ResolvedChatConfig } from '../config/config';
 import { callLlm } from '../llm/call';
+import { DEFAULT_MEMORY_CONFIG } from '../memory/types';
 import type { RenderedContext, RenderedContextSegment } from '../rendering/types';
 import type { ConversationEntry } from '../unified-api/types';
 
@@ -197,6 +198,7 @@ const makeChatConfig = (requireMaintainer: boolean): ResolvedChatConfig => ({
     summaryMaxEstTokens: 20000,
   },
   participation: { style: 'normal', brakeMessages10m: 10, cooldownSec: 0, maxPerHour: 0, botRounds: 2, botInteraction: 'requested' },
+  memory: DEFAULT_MEMORY_CONFIG,
   imageToText: { enabled: false, maxConcurrency: 1 },
   animationToText: { enabled: false, maxFrames: 0, maxConcurrency: 1 },
   customEmojiToText: { enabled: false, maxFrames: 0, maxConcurrency: 1 },

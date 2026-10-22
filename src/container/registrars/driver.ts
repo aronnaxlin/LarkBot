@@ -147,6 +147,8 @@ export const registerDriver = ({ get, register }: Registrar): void => {
       readOldMessages: (chatId, messageIds) =>
         renderOldMessagesXml(chatId, loadEventsByMessageIds(db, chatId, messageIds), pipeline.getRenderParams(chatId)),
       getSystemPromptHints: chatId => get(TOKENS.PLUGIN_HOST).getSystemPromptHints(chatId),
+      getPluginTools: chatId => get(TOKENS.PLUGIN_HOST).getTools(chatId),
+      getActiveScenes: chatId => get(TOKENS.PLUGIN_HOST).getActiveScenes(chatId),
       // Tool inputs may carry a rendered alias instead of the canonical id.
       // Aliases resolve through the live context first; a miss falls back to a
       // narrow message-id scan of persisted history, so reading or reacting to

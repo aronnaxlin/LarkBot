@@ -13,13 +13,30 @@ import {
   type PluginContext,
   type PluginDefinition,
   type PluginLogger,
+  type PluginTool,
   type PromptHint,
 } from '../../plugins/src/sdk';
 import { mergeChatConfig, resolveModel, type Config } from '../config/config';
+import type { ActiveScene } from '../driver/scenes';
+import { createTool, type CahciuaTool } from '../driver/tools';
 import type { EventSink } from '../event-sink';
 import { callLlm, type LlmCallConfig } from '../llm/call';
 import type { RuntimePluginEvent } from '../runtime-event';
 import type { ConversationEntry, OutputMessage, TextPart } from '../unified-api/types';
+
+export const BUILTIN_TOOL_NAMES: ReadonlySet<string> = new Set([
+  'send_message',
+  'react',
+  'end_turn',
+  'bash',
+  'kill_task',
+  'read_task_output',
+  'download_file',
+  'read_image',
+  'read_old_messages',
+  'sleep',
+  'ban_spammer',
+]);
 
 export interface PluginHost {
   start(): Promise<void>;
@@ -27,6 +44,8 @@ export interface PluginHost {
   isRunning(): boolean;
   getHttpServer(): PluginHttpServer;
   getSystemPromptHints(chatId: string): string[];
+  getTools(chatId: string): CahciuaTool[];
+  getActiveScenes(chatId: string): ActiveScene[];
 }
 
 export interface PluginHostDeps {
@@ -58,6 +77,17 @@ export const createPluginHost = (deps: {
   const httpServer = createPluginHttpServer(deps.logger.withContext('plugin-http'));
   const activePlugins = new Map<string, PluginDefinition<unknown>>();
   const activePromptHints = new Map<string, (chatId: string) => PromptHint[] | undefined>();
+
+  interface ActiveSceneState {
+    pluginId: string;
+    sceneId: string;
+    key: string;
+    defaultHint?: string;
+    idleTimeoutMs: number;
+    timer?: NodeJS.Timeout;
+  }
+
+  const activeScenes = new Map<string, Map<string, ActiveSceneState>>();
   let running = false;
 
   const isPluginEnabled = (pluginId: string): boolean => {
@@ -152,12 +182,101 @@ export const createPluginHost = (deps: {
       deps.eventSink.accept(runtimeEvent, {
         notifyDriver: options.wake ?? false,
       });
+
+      // Refresh inactivity timeout for any active scenes of this plugin in this chat
+      const chatScenes = activeScenes.get(chatId);
+      if (chatScenes) {
+        for (const [key, sceneState] of chatScenes) {
+          if (sceneState.pluginId === pluginId) {
+            if (sceneState.timer) clearTimeout(sceneState.timer);
+            const exitScene = () => {
+              const scenes = activeScenes.get(chatId);
+              if (!scenes) return;
+              const current = scenes.get(key);
+              if (current?.timer) clearTimeout(current.timer);
+              scenes.delete(key);
+              if (scenes.size === 0) activeScenes.delete(chatId);
+            };
+            const timer = setTimeout(() => {
+              exitScene();
+            }, sceneState.idleTimeoutMs);
+            if (timer.unref) timer.unref();
+            sceneState.timer = timer;
+          }
+        }
+      }
+    };
+
+    const enter = (chatId: string, sceneId: string) => {
+      if (!isPluginEnabledForChat(chatId, pluginId)) {
+        hostLogger.withFields({ chatId, pluginId, sceneId }).debug('Scene enter dropped: plugin not enabled for chat');
+        return;
+      }
+
+      const pluginDef = deps.plugins.find(p => p.id === pluginId);
+      const sceneDef = pluginDef?.contributes?.scenes?.find(s => s.id === sceneId);
+      if (!sceneDef) {
+        hostLogger.withFields({ pluginId, sceneId }).warn('Scene enter failed: scene not declared by plugin');
+        return;
+      }
+
+      const key = `${pluginId}.${sceneId}`;
+      let chatScenes = activeScenes.get(chatId);
+      if (!chatScenes) {
+        chatScenes = new Map();
+        activeScenes.set(chatId, chatScenes);
+      }
+
+      const existing = chatScenes.get(key);
+      if (existing?.timer) {
+        clearTimeout(existing.timer);
+      }
+
+      const idleTimeoutMs = sceneDef.idleTimeoutMs ?? 600_000;
+
+      const exitScene = () => {
+        const scenes = activeScenes.get(chatId);
+        if (!scenes) return;
+        const current = scenes.get(key);
+        if (current?.timer) clearTimeout(current.timer);
+        scenes.delete(key);
+        if (scenes.size === 0) activeScenes.delete(chatId);
+        hostLogger.withFields({ chatId, pluginId, sceneId }).debug('Scene exited');
+      };
+
+      const timer = setTimeout(() => {
+        hostLogger.withFields({ chatId, pluginId, sceneId }).debug('Scene expired via idle timeout');
+        exitScene();
+      }, idleTimeoutMs);
+      if (timer.unref) timer.unref();
+
+      chatScenes.set(key, {
+        pluginId,
+        sceneId,
+        key,
+        defaultHint: sceneDef.hint,
+        idleTimeoutMs,
+        timer,
+      });
+      hostLogger.withFields({ chatId, pluginId, sceneId }).debug('Scene entered');
+    };
+
+    const exit = (chatId: string, sceneId: string) => {
+      const key = `${pluginId}.${sceneId}`;
+      const scenes = activeScenes.get(chatId);
+      if (!scenes) return;
+      const current = scenes.get(key);
+      if (current?.timer) clearTimeout(current.timer);
+      scenes.delete(key);
+      if (scenes.size === 0) activeScenes.delete(chatId);
+      hostLogger.withFields({ chatId, pluginId, sceneId }).debug('Scene exited manually');
     };
 
     return {
       callModel,
       http: { route },
       chat: { publish },
+      scene: { enter, exit },
       storage: {
         get rootDir() {
           mkdirSync(dataRoot, { recursive: true });
@@ -176,6 +295,8 @@ export const createPluginHost = (deps: {
   const start = async (): Promise<void> => {
     if (running) return;
 
+    const registeredToolNames = new Map<string, string>();
+
     for (const plugin of deps.plugins) {
       if (plugin.sdkVersion !== CURRENT_SDK_VERSION) {
         throw new Error(
@@ -186,6 +307,50 @@ export const createPluginHost = (deps: {
       if (!isPluginEnabled(plugin.id)) {
         hostLogger.withFields({ pluginId: plugin.id }).debug('Plugin disabled in config');
         continue;
+      }
+
+      if (plugin.contributes?.tools) {
+        if (Array.isArray(plugin.contributes.tools)) {
+          const pluginToolNames = new Set<string>();
+          for (const tool of plugin.contributes.tools) {
+            if (BUILTIN_TOOL_NAMES.has(tool.name)) {
+              throw new Error(`Plugin tool name collision: "${tool.name}" from plugin "${plugin.id}" collides with a built-in tool`);
+            }
+            const otherPlugin = registeredToolNames.get(tool.name);
+            if (otherPlugin && otherPlugin !== plugin.id) {
+              throw new Error(`Plugin tool name collision: "${tool.name}" from plugin "${plugin.id}" collides with plugin "${otherPlugin}"`);
+            }
+            if (pluginToolNames.has(tool.name)) {
+              throw new Error(`Duplicate tool name "${tool.name}" in plugin "${plugin.id}"`);
+            }
+            pluginToolNames.add(tool.name);
+            registeredToolNames.set(tool.name, plugin.id);
+          }
+        } else if (typeof plugin.contributes.tools === 'function') {
+          const checkChats = ['default', ...Object.keys(deps.config.chats ?? {}).filter(k => k !== 'default')];
+          for (const chatId of checkChats) {
+            const merged = deps.config.chats?.[chatId] ? mergeChatConfig(deps.config, chatId) : undefined;
+            const chatPluginConfig = merged?.plugins?.[plugin.id];
+            const tools = plugin.contributes.tools(chatId, chatPluginConfig);
+            if (tools) {
+              const chatToolNames = new Set<string>();
+              for (const tool of tools) {
+                if (BUILTIN_TOOL_NAMES.has(tool.name)) {
+                  throw new Error(`Plugin tool name collision: "${tool.name}" from plugin "${plugin.id}" collides with a built-in tool`);
+                }
+                const otherPlugin = registeredToolNames.get(tool.name);
+                if (otherPlugin && otherPlugin !== plugin.id) {
+                  throw new Error(`Plugin tool name collision: "${tool.name}" from plugin "${plugin.id}" collides with plugin "${otherPlugin}"`);
+                }
+                if (chatToolNames.has(tool.name)) {
+                  throw new Error(`Duplicate tool name "${tool.name}" in plugin "${plugin.id}"`);
+                }
+                chatToolNames.add(tool.name);
+                registeredToolNames.set(tool.name, plugin.id);
+              }
+            }
+          }
+        }
       }
 
       let rawConfig: unknown = deps.config.plugins?.[plugin.id] ?? {};
@@ -243,6 +408,13 @@ export const createPluginHost = (deps: {
     activePlugins.clear();
     activePromptHints.clear();
 
+    for (const scenes of activeScenes.values()) {
+      for (const sceneState of scenes.values()) {
+        if (sceneState.timer) clearTimeout(sceneState.timer);
+      }
+    }
+    activeScenes.clear();
+
     try {
       await httpServer.stop();
     } catch (err) {
@@ -270,11 +442,59 @@ export const createPluginHost = (deps: {
     return hints;
   };
 
+  const getTools = (chatId: string): CahciuaTool[] => {
+    const tools: CahciuaTool[] = [];
+    for (const [pluginId, plugin] of activePlugins) {
+      if (!isPluginEnabledForChat(chatId, pluginId)) continue;
+      if (!plugin.contributes?.tools) continue;
+
+      let pluginTools: PluginTool[] | undefined;
+      if (Array.isArray(plugin.contributes.tools)) {
+        pluginTools = plugin.contributes.tools;
+      } else if (typeof plugin.contributes.tools === 'function') {
+        const merged = mergeChatConfig(deps.config, chatId);
+        const chatPluginConfig = merged.plugins?.[pluginId];
+        pluginTools = plugin.contributes.tools(chatId, chatPluginConfig);
+      }
+
+      if (pluginTools) {
+        for (const t of pluginTools) {
+          tools.push(createTool({
+            name: t.name,
+            description: t.description,
+            parameters: t.parameters,
+            execute: async input => {
+              const res = await t.execute(input);
+              return {
+                content: res.content,
+                requiresFollowUp: res.requiresFollowUp ?? false,
+              };
+            },
+          }));
+        }
+      }
+    }
+    return tools;
+  };
+
+  const getActiveScenes = (chatId: string): ActiveScene[] => {
+    const scenes = activeScenes.get(chatId);
+    if (!scenes) return [];
+    return Array.from(scenes.values()).map(s => ({
+      pluginId: s.pluginId,
+      sceneId: s.sceneId,
+      key: s.key,
+      defaultHint: s.defaultHint,
+    }));
+  };
+
   return {
     start,
     stop,
     isRunning: () => running,
     getHttpServer: () => httpServer,
     getSystemPromptHints,
+    getTools,
+    getActiveScenes,
   };
 };

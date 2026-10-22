@@ -79,15 +79,20 @@ export const renderLateBindingPrompt = async (params: {
   // A hard participation limit is reached and nothing deterministic addresses
   // the bot: only a direct address may wake it.
   participationLimited?: boolean;
+  // Extra late-binding hint contributed by an active scene or scene profile.
+  sceneHint?: string;
   // Pre-rendered person-memory block (src/memory/injection.ts). Appended after
   // the template output instead of interpolated into it: Velin collapses the
   // newlines of interpolated strings and escapes markdown characters, which
   // would mangle the entries.
   memoryXml?: string;
 }) => {
-  const { memoryXml, ...templateParams } = params;
+  const { memoryXml, sceneHint, ...templateParams } = params;
   const { rendered } = await renderMarkdownString(lateBindingTemplate, templateParams, basePath);
-  const prompt = cleanVelinOutput(rendered);
+  let prompt = cleanVelinOutput(rendered);
+  if (sceneHint) {
+    prompt = `${prompt}\n\n${sceneHint}`;
+  }
   return memoryXml ? `${prompt}\n\n${memoryXml}` : prompt;
 };
 

@@ -4,13 +4,9 @@ import { beforeEach, describe, expect, it, vi } from 'vitest';
 import { createPrimaryTools } from './primary-tools';
 import type { PrimaryToolsDependencies } from './primary-tools';
 import type { CahciuaTool } from './tools';
-import { createWebFetcher } from './web-fetch';
-import { createWebSearcher } from './web-search';
 import { renderImageToTextSystemPrompt } from '../media/image-to-text-prompt';
 import { callDescriptionLlm } from '../media/llm-description';
 
-vi.mock('./web-fetch', () => ({ createWebFetcher: vi.fn() }));
-vi.mock('./web-search', () => ({ createWebSearcher: vi.fn() }));
 vi.mock('../media/image-to-text-prompt', () => ({ renderImageToTextSystemPrompt: vi.fn() }));
 vi.mock('../media/llm-description', () => ({ callDescriptionLlm: vi.fn() }));
 
@@ -83,8 +79,6 @@ const createFixture = () => {
 };
 
 beforeEach(() => {
-  vi.mocked(createWebFetcher).mockReset();
-  vi.mocked(createWebSearcher).mockReset();
   vi.mocked(renderImageToTextSystemPrompt).mockReset();
   vi.mocked(callDescriptionLlm).mockReset();
 });
@@ -112,12 +106,8 @@ describe('createPrimaryTools', () => {
     expect(result.requiresFollowUp).toBe(true);
   });
 
-  it('preserves tool order and inserts configured web providers in place', async () => {
+  it('preserves tool order and inserts contributed plugin tools in place', async () => {
     const { deps } = createFixture();
-    const search = vi.fn(async () => ({ results: [] }));
-    const fetch = vi.fn(async (url: string) => ({ url, content: 'page' }));
-    vi.mocked(createWebSearcher).mockReturnValue({ search });
-    vi.mocked(createWebFetcher).mockReturnValue({ fetch });
 
     expect(createPrimaryTools(deps).map(tool => tool.name)).toEqual([
       'send_message',
@@ -132,18 +122,22 @@ describe('createPrimaryTools', () => {
       'end_turn',
     ]);
 
-    const webSearch = { provider: 'exa' as const, apiKey: 'exa-key' };
-    const webFetch = { provider: 'jina' as const, jina: { apiKey: 'jina-key' } };
-    deps.chatConfig.tools.webSearch = webSearch;
-    deps.chatConfig.tools.webFetch = webFetch;
+    const mockPluginTool: CahciuaTool = {
+      name: 'plugin_custom_tool',
+      description: 'Custom plugin tool',
+      parameters: { type: 'object' },
+      validate: () => ({ valid: true, errors: [] }),
+      execute: vi.fn(async () => ({ content: 'custom result', requiresFollowUp: true })),
+    };
+
+    deps.pluginTools = [mockPluginTool];
     const tools = createPrimaryTools(deps);
 
     expect(tools.map(tool => tool.name)).toEqual([
       'send_message',
       'react',
       'bash',
-      'web_search',
-      'web_fetch',
+      'plugin_custom_tool',
       'download_file',
       'read_image',
       'kill_task',
@@ -152,13 +146,9 @@ describe('createPrimaryTools', () => {
       'sleep',
       'end_turn',
     ]);
-    expect(createWebSearcher).toHaveBeenCalledWith(webSearch);
-    expect(createWebFetcher).toHaveBeenCalledWith(webFetch);
 
-    await findTool(tools, 'web_search').execute({ query: 'query' });
-    await findTool(tools, 'web_fetch').execute({ url: 'https://example.test' });
-    expect(search).toHaveBeenCalledWith('query');
-    expect(fetch).toHaveBeenCalledWith('https://example.test');
+    await findTool(tools, 'plugin_custom_tool').execute({});
+    expect(mockPluginTool.execute).toHaveBeenCalledWith({});
   });
 
   it('keeps send_message semantics and checks Telegram message ids before I/O', async () => {

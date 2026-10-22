@@ -6,7 +6,7 @@ import * as v from 'valibot';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
 import { createPluginHost } from './host';
-import { CURRENT_SDK_VERSION, definePlugin, type PluginDefinition } from '../../plugins/src/sdk';
+import { CURRENT_SDK_VERSION, definePlugin, type PluginCapabilities, type PluginDefinition } from '../../plugins/src/sdk';
 import type { Config } from '../config/config';
 import type { EventSink } from '../event-sink';
 import type { PipelineEvent } from '../projection/reduce';
@@ -469,6 +469,297 @@ describe('Core Plugin Host', () => {
       expect(body).not.toContain('secret123');
       expect(body).toContain('Internal Server Error');
 
+      await host.stop();
+    });
+  });
+
+  describe('tools extension point', () => {
+    it('fails fast when a plugin tool name collides with a built-in tool', async () => {
+      const config = makeMockConfig({ test_plugin: { enabled: true } });
+      const { eventSink, logger } = createMockDeps();
+
+      const collidingPlugin = definePlugin({
+        id: 'test_plugin',
+        sdkVersion: CURRENT_SDK_VERSION,
+        contributes: {
+          tools: [
+            {
+              name: 'send_message',
+              description: 'Colliding tool',
+              parameters: { type: 'object' },
+              execute: () => ({ content: '' }),
+            },
+          ],
+        },
+        setup: () => {},
+      });
+
+      const host = createPluginHost({
+        config,
+        eventSink,
+        logger,
+        plugins: [collidingPlugin],
+        dataDir: tmpDataDir,
+      });
+
+      await expect(host.start()).rejects.toThrow(/collides with a built-in tool/);
+    });
+
+    it('fails fast when two plugins contribute the same tool name', async () => {
+      const config = makeMockConfig({
+        plugin_a: { enabled: true },
+        plugin_b: { enabled: true },
+      });
+      const { eventSink, logger } = createMockDeps();
+
+      const pluginA = definePlugin({
+        id: 'plugin_a',
+        sdkVersion: CURRENT_SDK_VERSION,
+        contributes: {
+          tools: [
+            {
+              name: 'shared_tool',
+              description: 'A tool',
+              parameters: { type: 'object' },
+              execute: () => ({ content: '' }),
+            },
+          ],
+        },
+        setup: () => {},
+      });
+
+      const pluginB = definePlugin({
+        id: 'plugin_b',
+        sdkVersion: CURRENT_SDK_VERSION,
+        contributes: {
+          tools: [
+            {
+              name: 'shared_tool',
+              description: 'Another tool',
+              parameters: { type: 'object' },
+              execute: () => ({ content: '' }),
+            },
+          ],
+        },
+        setup: () => {},
+      });
+
+      const host = createPluginHost({
+        config,
+        eventSink,
+        logger,
+        plugins: [pluginA, pluginB],
+        dataDir: tmpDataDir,
+      });
+
+      await expect(host.start()).rejects.toThrow(/collides with plugin "plugin_a"/);
+    });
+
+    it('fails fast on duplicate tool name within the same plugin', async () => {
+      const config = makeMockConfig({ test_plugin: { enabled: true } });
+      const { eventSink, logger } = createMockDeps();
+
+      const duplicatePlugin = definePlugin({
+        id: 'test_plugin',
+        sdkVersion: CURRENT_SDK_VERSION,
+        contributes: {
+          tools: [
+            {
+              name: 'dup_tool',
+              description: 'First',
+              parameters: { type: 'object' },
+              execute: () => ({ content: '' }),
+            },
+            {
+              name: 'dup_tool',
+              description: 'Second',
+              parameters: { type: 'object' },
+              execute: () => ({ content: '' }),
+            },
+          ],
+        },
+        setup: () => {},
+      });
+
+      const host = createPluginHost({
+        config,
+        eventSink,
+        logger,
+        plugins: [duplicatePlugin],
+        dataDir: tmpDataDir,
+      });
+
+      await expect(host.start()).rejects.toThrow(/Duplicate tool name "dup_tool"/);
+    });
+
+    it('exposes contributed tools only to chats that have the plugin enabled', async () => {
+      const config = makeMockConfig({ tool_plugin: { enabled: true } });
+      config.chats['oc_enabled'] = {
+        plugins: { tool_plugin: { enabled: true } },
+      } as any;
+      config.chats['oc_disabled'] = {
+        plugins: { tool_plugin: { enabled: false } },
+      } as any;
+
+      const { eventSink, logger } = createMockDeps();
+
+      const toolPlugin = definePlugin({
+        id: 'tool_plugin',
+        sdkVersion: CURRENT_SDK_VERSION,
+        contributes: {
+          tools: (_chatId: string) => [
+            {
+              name: 'custom_calc',
+              description: 'A calculator tool',
+              parameters: {
+                type: 'object',
+                properties: { num: { type: 'number' } },
+                required: ['num'],
+              },
+              execute: (input: any) => ({
+                content: `result: ${input.num * 2}`,
+                requiresFollowUp: true,
+              }),
+            },
+          ],
+        },
+        setup: () => {},
+      });
+
+      const host = createPluginHost({
+        config,
+        eventSink,
+        logger,
+        plugins: [toolPlugin],
+        dataDir: tmpDataDir,
+      });
+
+      await host.start();
+
+      const enabledTools = host.getTools('oc_enabled');
+      expect(enabledTools.map(t => t.name)).toEqual(['custom_calc']);
+
+      const tool = enabledTools[0]!;
+      expect(tool.description).toBe('A calculator tool');
+      const valid = tool.validate({ num: 21 });
+      expect(valid.valid).toBe(true);
+      const res = await tool.execute({ num: 21 });
+      expect(res).toEqual({ content: 'result: 42', requiresFollowUp: true });
+
+      const disabledTools = host.getTools('oc_disabled');
+      expect(disabledTools).toEqual([]);
+
+      await host.stop();
+    });
+  });
+
+  describe('scenes capability and extension point', () => {
+    it('manages scene enter, exit, and idle timeout', async () => {
+      vi.useFakeTimers();
+      const config = makeMockConfig({ scene_plugin: { enabled: true } });
+      config.chats['oc_scene_chat'] = {
+        plugins: { scene_plugin: { enabled: true } },
+      } as any;
+
+      const { eventSink, logger } = createMockDeps();
+      let capturedCaps: PluginCapabilities | undefined;
+
+      const scenePlugin = definePlugin({
+        id: 'scene_plugin',
+        sdkVersion: CURRENT_SDK_VERSION,
+        contributes: {
+          scenes: [
+            {
+              id: 'arena',
+              hint: 'Arena default hint',
+              idleTimeoutMs: 5000,
+            },
+          ],
+        },
+        setup: ctx => {
+          capturedCaps = ctx.capabilities;
+        },
+      });
+
+      const host = createPluginHost({
+        config,
+        eventSink,
+        logger,
+        plugins: [scenePlugin],
+        dataDir: tmpDataDir,
+      });
+
+      await host.start();
+      expect(capturedCaps).toBeDefined();
+
+      // Enter scene
+      capturedCaps!.scene.enter('oc_scene_chat', 'arena');
+      const scenes = host.getActiveScenes('oc_scene_chat');
+      expect(scenes).toEqual([
+        {
+          pluginId: 'scene_plugin',
+          sceneId: 'arena',
+          key: 'scene_plugin.arena',
+          defaultHint: 'Arena default hint',
+        },
+      ]);
+
+      // Advance time by 4 seconds (timeout is 5000ms) - still active
+      vi.advanceTimersByTime(4000);
+      expect(host.getActiveScenes('oc_scene_chat')).toHaveLength(1);
+
+      // chat.publish from the same plugin refreshes the timeout
+      await capturedCaps!.chat.publish('oc_scene_chat', { text: 'Round 2 start' });
+
+      // Advance by another 4 seconds (8s from start, but 4s from refresh) - still active
+      vi.advanceTimersByTime(4000);
+      expect(host.getActiveScenes('oc_scene_chat')).toHaveLength(1);
+
+      // Advance another 2 seconds (6s from refresh) - now expired
+      vi.advanceTimersByTime(2000);
+      expect(host.getActiveScenes('oc_scene_chat')).toEqual([]);
+
+      // Manual enter and exit
+      capturedCaps!.scene.enter('oc_scene_chat', 'arena');
+      expect(host.getActiveScenes('oc_scene_chat')).toHaveLength(1);
+      capturedCaps!.scene.exit('oc_scene_chat', 'arena');
+      expect(host.getActiveScenes('oc_scene_chat')).toEqual([]);
+
+      await host.stop();
+      vi.useRealTimers();
+    });
+
+    it('drops scene enter if plugin is disabled for the chat', async () => {
+      const config = makeMockConfig({ scene_plugin: { enabled: true } });
+      config.chats['oc_disabled_chat'] = {
+        plugins: { scene_plugin: { enabled: false } },
+      } as any;
+
+      const { eventSink, logger } = createMockDeps();
+      let capturedCaps: PluginCapabilities | undefined;
+
+      const scenePlugin = definePlugin({
+        id: 'scene_plugin',
+        sdkVersion: CURRENT_SDK_VERSION,
+        contributes: {
+          scenes: [{ id: 'arena', hint: 'Arena' }],
+        },
+        setup: ctx => {
+          capturedCaps = ctx.capabilities;
+        },
+      });
+
+      const host = createPluginHost({
+        config,
+        eventSink,
+        logger,
+        plugins: [scenePlugin],
+        dataDir: tmpDataDir,
+      });
+
+      await host.start();
+      capturedCaps!.scene.enter('oc_disabled_chat', 'arena');
+      expect(host.getActiveScenes('oc_disabled_chat')).toEqual([]);
       await host.stop();
     });
   });

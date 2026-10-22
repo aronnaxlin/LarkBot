@@ -16,12 +16,8 @@ import {
   createReadTaskOutputTool,
   createSendMessageTool,
   createSleepTool,
-  createWebFetchTool,
-  createWebSearchTool,
 } from './tools';
 import type { CahciuaTool } from './tools';
-import { createWebFetcher } from './web-fetch';
-import { createWebSearcher } from './web-search';
 import type { ResolvedChatConfig, RuntimeConfig } from '../config/config';
 import type { LlmEndpoint } from '../llm/types';
 import { renderImageToTextSystemPrompt } from '../media/image-to-text-prompt';
@@ -65,6 +61,7 @@ export interface PrimaryToolsDependencies extends Pick<
       limit?: number,
     ) => Promise<{ content: string; totalLines: number; truncated: boolean } | { error: string }>;
   };
+  pluginTools?: CahciuaTool[];
   log: Logger;
 }
 
@@ -174,10 +171,9 @@ export const createPrimaryTools = (deps: PrimaryToolsDependencies): CahciuaTool[
     }));
   }
 
-  if (deps.chatConfig.tools.webSearch)
-    tools.push(createWebSearchTool(createWebSearcher(deps.chatConfig.tools.webSearch)));
-  if (deps.chatConfig.tools.webFetch)
-    tools.push(createWebFetchTool(createWebFetcher(deps.chatConfig.tools.webFetch)));
+  if (deps.pluginTools) {
+    tools.push(...deps.pluginTools);
+  }
 
   if (inboundAttachmentsSupported) {
     tools.push(createDownloadFileTool({

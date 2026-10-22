@@ -137,7 +137,7 @@ const config: Linter.Config[] = [
       'types/**',
       // Root config files (not in tsconfig include)
       'eslint.config.ts',
-      'vitest.config.ts',
+      '**/vitest.config.ts',
       'tsdown.config.ts',
       'drizzle.config.ts',
     ],

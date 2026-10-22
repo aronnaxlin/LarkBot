@@ -115,17 +115,25 @@ When allowed, the event is saved in the database as a generic runtime event (`ki
 <plugin-event plugin="tavern" t="10-22 20:30:00">Alice challenged Bob!</plugin-event>
 ```
 
-### 4. `storage`
+### 4. `scene`
+
+Enters or exits contextual scenes contributed by the plugin:
+
+- `ctx.capabilities.scene.enter(chatId, sceneId)`: Activates the scene `<pluginId>.<sceneId>` for the chat. Refreshes the scene's inactivity timeout (`idleTimeoutMs`, default 10 min).
+- `ctx.capabilities.scene.exit(chatId, sceneId)`: Exits the scene manually for the chat.
+- Inactivity timeouts are automatically refreshed whenever the plugin invokes `chat.publish(chatId, ...)` to that chat.
+
+### 5. `storage`
 
 Provides access to an isolated, writable filesystem directory for the plugin under the host's data volume:
 
 - `ctx.capabilities.storage.rootDir`: Points to `<dataDir>/plugins/<pluginId>/` (ensured to exist).
 
-### 5. `log`
+### 6. `log`
 
 Provides a scoped logger (`ctx.capabilities.log`) outputting under context `plugin:<pluginId>`.
 
-### 6. `media.send(chatId, media)`
+### 7. `media.send(chatId, media)`
 
 Interface stub for sending outbound media. In the current release, invoking this method throws a typed error (`media.send is unsupported`).
 
@@ -189,10 +197,72 @@ Declared in `plugin.contributes`:
 |---|---|---|
 | `httpRoutes` | Implemented | Static routes mounted on the core HTTP server. |
 | `promptHints` | Implemented | `(chatId: string) => PromptHint[]` contributing system prompt instructions for chats where the plugin is enabled. |
-| `tools` | Declared | Primary LLM tools callable during the Driver's turn loop. |
+| `tools` | Implemented | `PluginTool[] \| ((chatId: string, chatConfig?: unknown) => PluginTool[])` contributing primary LLM tools callable during the Driver's turn loop for enabled chats. |
+| `scenes` | Implemented | `PluginSceneDefinition[]` contributing contextual scene definitions (`id`, `hint`, `idleTimeoutMs`) activated via `scene.enter`/`exit`. |
 | `memoryBackend` | Declared | Custom memory storage backend (e.g. Mem0). |
 | `mediaResolvers` | Declared | Media frame/transcription resolvers (e.g. speech-to-text). |
-| `scenes` | Declared | Multi-turn contextual scene state machines (scheduled for round 2b). |
+
+---
+
+## 7. Scenes & Context Overrides
+
+Plugins declare scenes via `contributes.scenes: [{ id: 'table', hint: '...', idleTimeoutMs: 600000 }]`.
+Scenes are entered and exited by the plugin using `ctx.capabilities.scene.enter(chatId, sceneId)` and `exit(chatId, sceneId)`.
+State is held in-memory per chat by the host.
+
+While a scene is active for a chat:
+1. **Scene profile merge**: The Driver applies the scene profile configured under `chats.<id>.scenes.<pluginId>.<sceneId>`, merged over chat config for that wake-up only:
+   ```yaml
+   chats:
+     <id>:
+       scenes:
+         tavern.table:          # <pluginId>.<sceneId>
+           hint: "…"            # late-binding prompt instruction
+           participation: { botRounds: 2, brakeMessages10m: 12 }
+           primary: { extraBody: { reasoning_effort: low } }
+   ```
+2. **Strict validation**: Only `hint`, `participation`, and `primary.extraBody` are accepted in v1. Unknown keys (including model switching) are rejected to preserve prefix prompt caching.
+3. **Late-binding hint**: The scene's default hint comes from the plugin; config overrides it. The hint is appended only to the primary late-binding prompt, keeping probe prompts unaffected and prompt prefixes cache-safe.
+4. **Inactivity timeout**: If no new `chat.publish` occurs from that plugin to that chat within `idleTimeoutMs` (default 10 minutes), the scene automatically expires.
+
+---
+
+## 8. Web Plugin & Configuration Migration
+
+Web search (`web_search`) and web fetch (`web_fetch`) are provided by the `web` plugin (`plugins/src/web/`).
+
+### Migration from Legacy Core Web Config
+
+The legacy keys `tools.web.providers` and `chats.<id>.tools.webSearch/webFetch` have been removed from core.
+Configuration is migrated to `plugins.web` and `chats.<id>.plugins.web`:
+
+**Before (legacy):**
+```yaml
+chats:
+  default:
+    tools:
+      web:
+        providers:
+          tavily: { apiKey: "tvly-..." }
+        search: "tavily"
+        fetch: "jina"
+```
+
+**After (plugins):**
+```yaml
+plugins:
+  web:
+    providers:
+      tavily: { apiKey: "tvly-..." }
+    search: "tavily"
+    fetch: "jina"
+
+chats:
+  default:
+    plugins:
+      web:
+        enabled: true
+```
 
 ---
 

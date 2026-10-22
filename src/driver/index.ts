@@ -7,7 +7,9 @@ import type { ProbeWindowState } from './context';
 import type { DriverPlatform } from './platform';
 import { createPrimaryTools } from './primary-tools';
 import { createRunner } from './runner';
+import { applySceneOverrides, getActiveSceneHint, type ActiveScene } from './scenes';
 import { createReplyScheduler } from './scheduler';
+import type { CahciuaTool } from './tools';
 import { isTransientModelError } from './transient-error';
 import type { CompactionSessionMeta, DriverConfig, ProbeResponseV2, TurnResponseV2 } from './types';
 import { executeWakeup } from './wakeup';
@@ -49,6 +51,8 @@ export const createDriver = (config: DriverConfig, deps: DriverPlatform & {
   memory?: MemoryDeps;
   // Gated extension hints contributed by enabled plugins for this chat.
   getSystemPromptHints?: (chatId: string) => string[];
+  getPluginTools?: (chatId: string) => CahciuaTool[];
+  getActiveScenes?: (chatId: string) => ActiveScene[];
   backgroundTask: {
     startTask: (typeName: string, sessionId: string, params: unknown, intention: string | undefined, timeoutMs: number) => number;
     killTask: (taskId: number) => { ok: boolean; error?: string };
@@ -114,14 +118,6 @@ export const createDriver = (config: DriverConfig, deps: DriverPlatform & {
       compactionMeta,
       log,
     });
-    const runner = createRunner({
-      apiBaseUrl: chatConfig.primary.model.apiBaseUrl,
-      apiKey: chatConfig.primary.model.apiKey,
-      model: chatConfig.primary.model.model,
-      apiFormat: chatConfig.primary.model.apiFormat,
-      timeoutSec: chatConfig.primary.model.timeoutSec,
-      extraBody: chatConfig.primary.model.extraBody,
-    });
 
     const createTools = () => createPrimaryTools({
       chatId,
@@ -139,6 +135,7 @@ export const createDriver = (config: DriverConfig, deps: DriverPlatform & {
       formatMessageId: id => deps.formatMessageId?.(chatId, id) ?? id,
       resolveModel: deps.resolveModel,
       backgroundTask: deps.backgroundTask,
+      pluginTools: deps.getPluginTools?.(chatId),
       log,
     });
 
@@ -155,11 +152,23 @@ export const createDriver = (config: DriverConfig, deps: DriverPlatform & {
         // Survives a primary failure so the retry need not rerun probe.
         let probeActivation = retry?.probeActivation;
         try {
+          const activeScenes = deps.getActiveScenes?.(chatId) ?? [];
+          const effectiveChatConfig = applySceneOverrides(chatConfig, activeScenes);
+          const sceneHint = getActiveSceneHint(effectiveChatConfig, activeScenes);
+          const runner = createRunner({
+            apiBaseUrl: effectiveChatConfig.primary.model.apiBaseUrl,
+            apiKey: effectiveChatConfig.primary.model.apiKey,
+            model: effectiveChatConfig.primary.model.model,
+            apiFormat: effectiveChatConfig.primary.model.apiFormat,
+            timeoutSec: effectiveChatConfig.primary.model.timeoutSec,
+            extraBody: effectiveChatConfig.primary.model.extraBody,
+          });
+
           await executeWakeup({
             chatId,
-            chatConfig,
+            chatConfig: effectiveChatConfig,
             currentChannel: deps.name,
-            turnBudget: chatConfig.primary.turnBudget,
+            turnBudget: effectiveChatConfig.primary.turnBudget,
             contextAtStart,
             currentContext: rc,
             cursorMs: cursorMs(),
@@ -181,6 +190,7 @@ export const createDriver = (config: DriverConfig, deps: DriverPlatform & {
             memoryEnabled: memory.injecting,
             loadMemorySnapshot: memory.loadSnapshot,
             promptHints: deps.getSystemPromptHints?.(chatId),
+            sceneHint,
             log,
           });
           return { kind: 'done' };

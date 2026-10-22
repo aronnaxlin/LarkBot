@@ -59,6 +59,14 @@ plugins:
   server:
     host: "0.0.0.0"
     port: 8787
+  web:
+    providers:
+      tavily: { apiKey: "" }
+      microsoftGrounding: { apiKey: "" }
+      jina: { apiKey: "" }
+      exa: { apiKey: "" }
+    search: "tavily" # tavily | microsoft-grounding | jina | exa
+    fetch: "jina"
   tavern:
     enabled: false
     secret: ""            # shared HMAC secret agreed with the dealer; kept out of git
@@ -205,6 +213,17 @@ chats:
     plugins:
       tavern:
         enabled: false
+      web:
+        enabled: false
+    scenes:
+      tavern.table:
+        hint: "You are currently participating in a mini-game table in this group. Keep table talk short, in character, and stay in persona."
+        participation:
+          botRounds: 2
+          brakeMessages10m: 12
+        primary:
+          extraBody:
+            reasoning_effort: "low"
     tools:
       # Enable per chat only; moderation policy belongs in that chat's systemFiles.
       banSpammer: false
@@ -221,14 +240,6 @@ chats:
         # gate (bounds the window after silent turns and no_action probes).
         maintainerWindowSec: 600
         backgroundThresholdSec: 10
-      web:
-        providers:
-          tavily: { apiKey: "" }
-          microsoftGrounding: { apiKey: "" }
-          jina: { apiKey: "" }
-          exa: { apiKey: "" }
-        # search: "tavily" # tavily | microsoft-grounding | jina | exa
-        # fetch: "jina"
 
   # Replace with a Telegram chat ID (or a Feishu `oc_...` group chat ID) to
   # enable residency and Driver processing.

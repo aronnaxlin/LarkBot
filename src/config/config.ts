@@ -7,8 +7,6 @@ import { parse as parseYaml } from 'yaml';
 
 import { DEFAULT_PROBE_TIMEOUT_MS, DEFAULT_TURN_BUDGET } from '../driver/turn-budget';
 import type { CompactionConfig, DebounceConfig, TurnBudget } from '../driver/types';
-import type { WebFetchConfig } from '../driver/web-fetch/types';
-import type { WebSearchConfig } from '../driver/web-search/types';
 import { registerHttpSecret } from '../http';
 import type { LlmEndpoint } from '../llm/types';
 import { DEFAULT_MEMORY_CONFIG } from '../memory/types';
@@ -91,6 +89,23 @@ const MemoryCountSchema = v.pipe(v.number(), v.integer(), v.minValue(1));
 const MemoryTriggerMessagesSchema = v.pipe(v.number(), v.integer(), v.minValue(5));
 const MemoryNonNegativeIntSchema = v.pipe(v.number(), v.integer(), v.minValue(0));
 
+export const SceneProfileSchema = v.strictObject({
+  hint: v.optional(v.string()),
+  participation: v.optional(v.partial(v.object({
+    style: ParticipationStyleSchema,
+    brakeMessages10m: BrakeMessages10mSchema,
+    cooldownSec: NonNegativeIntSchema,
+    maxPerHour: NonNegativeIntSchema,
+    botRounds: BotRoundsSchema,
+    botInteraction: BotInteractionSchema,
+  }))),
+  primary: v.optional(v.strictObject({
+    extraBody: v.optional(v.record(v.string(), v.unknown())),
+  })),
+});
+
+export type SceneProfile = v.InferOutput<typeof SceneProfileSchema>;
+
 const ChatConfigSchema = v.object({
   primary: v.optional(v.object({
     model: v.optional(v.string(), 'primary'),
@@ -157,6 +172,7 @@ const ChatConfigSchema = v.object({
     maxFrames: v.optional(v.number(), 5),
     maxConcurrency: v.optional(v.number(), 3),
   }), {}),
+  scenes: v.optional(v.record(v.string(), SceneProfileSchema), {}),
   tools: v.object({
     banSpammer: v.optional(v.boolean(), false),
     bash: v.optional(v.object({
@@ -169,18 +185,8 @@ const ChatConfigSchema = v.object({
       requireMaintainer: v.optional(v.boolean(), true),
       maintainerWindowSec: v.optional(BashMaintainerWindowSecSchema, 600),
     }), {}),
-    web: v.optional(v.object({
-      providers: v.optional(v.object({
-        tavily: v.optional(v.object({ apiKey: v.optional(v.string(), '') }), {}),
-        microsoftGrounding: v.optional(v.object({ apiKey: v.optional(v.string(), '') }), {}),
-        jina: v.optional(v.object({ apiKey: v.optional(v.string(), '') }), {}),
-        exa: v.optional(v.object({ apiKey: v.optional(v.string(), '') }), {}),
-      }), {}),
-      search: v.optional(v.picklist(['tavily', 'microsoft-grounding', 'jina', 'exa'])),
-      fetch: v.optional(v.picklist(['jina'])),
-    }), {}),
   }),
-  plugins: v.optional(v.record(v.string(), v.object({
+  plugins: v.optional(v.record(v.string(), v.looseObject({
     enabled: v.optional(v.boolean(), false),
   })), {}),
 });
@@ -260,18 +266,9 @@ const ChatOverrideSchema = v.optional(v.partial(v.object({
       requireMaintainer: v.boolean(),
       maintainerWindowSec: BashMaintainerWindowSecSchema,
     })),
-    web: v.partial(v.object({
-      providers: v.partial(v.object({
-        tavily: v.partial(v.object({ apiKey: v.string() })),
-        microsoftGrounding: v.partial(v.object({ apiKey: v.string() })),
-        jina: v.partial(v.object({ apiKey: v.string() })),
-        exa: v.partial(v.object({ apiKey: v.string() })),
-      })),
-      search: v.picklist(['tavily', 'microsoft-grounding', 'jina', 'exa']),
-      fetch: v.picklist(['jina']),
-    })),
   })),
-  plugins: v.optional(v.record(v.string(), v.partial(v.object({
+  scenes: v.optional(v.record(v.string(), SceneProfileSchema)),
+  plugins: v.optional(v.record(v.string(), v.partial(v.looseObject({
     enabled: v.boolean(),
   })))),
 })), {});
@@ -373,11 +370,10 @@ export interface ResolvedChatConfig {
   animationToText: { enabled: boolean; model?: string; maxFrames: number; maxConcurrency: number };
   customEmojiToText: { enabled: boolean; model?: string; maxFrames: number; maxConcurrency: number };
   plugins: Record<string, { enabled: boolean }>;
+  scenes?: Record<string, SceneProfile>;
   tools: {
     banSpammer: boolean;
     bash: { enabled: boolean; backgroundThresholdSec: number; requireMaintainer: boolean; maintainerWindowSec: number };
-    webSearch?: WebSearchConfig;
-    webFetch?: WebFetchConfig;
   };
 }
 
@@ -520,26 +516,6 @@ export const resolveChatConfig = (config: Config, chatId: string): ResolvedChatC
   const merged = mergeChatConfig(config, chatId);
 
   const primaryModel = resolveModel(config, merged.primary.model);
-  const web = merged.tools.web;
-  const providers = web.providers;
-
-  let webSearch: WebSearchConfig | undefined;
-  if (web.search) {
-    const apiKey = web.search === 'tavily' ? providers.tavily.apiKey
-      : web.search === 'microsoft-grounding' ? providers.microsoftGrounding.apiKey
-        : web.search === 'jina' ? providers.jina.apiKey
-          : providers.exa.apiKey;
-    const providerKey = web.search === 'microsoft-grounding' ? 'microsoftGrounding' : web.search;
-    if (!apiKey)
-      throw new Error(`Chat ${chatId}: tools.web.providers.${providerKey}.apiKey is required for web.search="${web.search}".`);
-    webSearch = { provider: web.search, apiKey };
-  }
-
-  let webFetch: WebFetchConfig | undefined;
-  if (web.fetch === 'jina') {
-    // Jina fetch's apiKey is optional (anonymous tier works); empty string passes through.
-    webFetch = { provider: 'jina', jina: { apiKey: providers.jina.apiKey } };
-  }
 
   return {
     primary: {
@@ -587,6 +563,7 @@ export const resolveChatConfig = (config: Config, chatId: string): ResolvedChatC
       maxConcurrency: merged.customEmojiToText.maxConcurrency,
     },
     plugins: merged.plugins ?? {},
+    scenes: merged.scenes,
     tools: {
       banSpammer: merged.tools.banSpammer,
       bash: {
@@ -595,8 +572,6 @@ export const resolveChatConfig = (config: Config, chatId: string): ResolvedChatC
         requireMaintainer: merged.tools.bash.requireMaintainer,
         maintainerWindowSec: merged.tools.bash.maintainerWindowSec,
       },
-      ...(webSearch ? { webSearch } : {}),
-      ...(webFetch ? { webFetch } : {}),
     },
   };
 };

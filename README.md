@@ -29,7 +29,7 @@ On top of it, LuckyBot adds:
 - **Per-Person Long-Term Memory (Phase 1):** Human-readable Markdown cards per member (`people/<open_id>.md`) and self-notes (`SELF.md`), maintained by an asynchronous background consolidator with strict provenance validation, owner-evidence requirements, and prompt-injection safety guards.
 - **Safe & Bounded Tool Execution:** Strict per-turn budgets (tool rounds, work-tool limits, model deadlines) prevent runaway loops. System shell access (`bash`, `kill_task`, `read_task_output`) is strictly gated by a trusted maintainer list and executed inside an isolated sandbox container.
 - **Autonomous Context Compaction:** Background compaction controller summarizes older context when estimated token counts exceed thresholds, preserving conversation continuity.
-- **Modular Plugin System:** Capability-based plugin host running independent extension modules (mounted from `plugins/`, e.g. group mini-game webhooks) with strict memory/chat privacy isolation and per-chat gating.
+- **Modular Plugin System:** Capability-based plugin host running independent extension modules (mounted from `plugins/`, e.g. group mini-game webhooks, web search & fetch) with tool and scene extension points, strict memory/chat privacy isolation, and per-chat gating.
 
 ## Quick Start
 

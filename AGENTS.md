@@ -130,10 +130,12 @@ Implemented in phase 1; design and rationale in [docs/memory-design.md](docs/mem
 
 Core acts as the host; the plugin repository (`plugins/`, submodule pointing to `LuckyBot-Plugin`) holds the contract (`sdk/`) and plugin modules. Full specification in `docs/plugins.md`.
 
-- **Capabilities and Isolation.** Plugins never receive the DI container, database connections, platform clients (TDLib/Feishu), or chat context (IC/RC). They receive only injected capabilities: `callModel`, `http.route`, `chat.publish`, `storage`, `log`, and `media.send`.
+- **Capabilities and Isolation.** Plugins never receive the DI container, database connections, platform clients (TDLib/Feishu), or chat context (IC/RC). They receive only injected capabilities: `callModel`, `http.route`, `chat.publish`, `scene`, `storage`, `log`, and `media.send`.
 - **Privacy Invariant.** Private plugin state (such as secret card hands, private round info, internal tokens) resides exclusively in plugin memory or local storage. It must never enter projection, IC, RC, events or turn responses tables, or prompts. The only bridge into a group is `chat.publish`, which takes only public, broadcast-safe text.
 - **Per-Chat Gating.** Plugins are disabled globally and per chat by default (`chats.<id>.plugins.<pluginId>.enabled: false`). `chat.publish` drops calls for unconfigured or disabled chats.
 - **Prompt Hints.** Plugins may contribute system prompt hints (`promptHints`) rendered only for chats where the plugin is enabled; disabled chats render byte-identical prompts.
+- **Tools Extension Point.** Plugins may contribute primary LLM tools (`tools`) per chat; exposed only for chats where the plugin is enabled; count as work tools under the turn budget; tool names must not collide with built-ins or other plugins (fails fast at startup). Web search and web fetch are provided by the `web` plugin (`plugins/src/web/`).
+- **Scenes and Overrides.** Plugins declare scenes (`scenes`) and manage active state per chat via `scene.enter` and `scene.exit` with idle timeout (`idleTimeoutMs`, default 10m, refreshed on `chat.publish`). Active scenes merge configured profile overrides (`hint`, `participation`, `primary.extraBody`) for that wake-up only.
 - **SDK Versioning.** Breaking capability changes bump `sdkVersion`; the host checks compatibility on startup and fails fast on mismatch.
 
 ### Consistency Above Availability

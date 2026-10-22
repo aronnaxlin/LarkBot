@@ -8,6 +8,11 @@ const DEFAULT_FAILURE_BACKOFF_MS = 10 * 60 * 1000;
 // is not on it (a member who just joined); a hit keeps it for the refresh window.
 const DEFAULT_MEMBER_MISS_BACKOFF_MS = 10 * 60 * 1000;
 
+const CONTACT_OUT_OF_RANGE_CODE = 41050;
+
+const isOutOfContactRange = (error: unknown): boolean =>
+  (error as { details?: { code?: unknown } } | null)?.details?.code === CONTACT_OUT_OF_RANGE_CODE;
+
 interface ChatMembersEntry {
   names: Map<string, string>;
   // Next time the member list may be fetched again.
@@ -70,9 +75,17 @@ export const createFeishuUserNames = (deps: {
         if (name) entry.name = name;
         entry.refreshAtMs = now() + refreshMs;
       }, (error: unknown) => {
+        const message = error instanceof Error ? error.message : String(error);
+        // 41050 means the user is outside the app's contact range (almost every
+        // member of an external-tenant group). It will not change on retry, so
+        // wait the full refresh window and rely on the member-list fallback.
+        if (isOutOfContactRange(error)) {
+          entry.refreshAtMs = now() + refreshMs;
+          log.withFields({ openId, error: message }).debug('Contact name not visible to the app; using the chat member list');
+          return;
+        }
         entry.refreshAtMs = now() + failureBackoffMs;
-        log.withFields({ openId, error: error instanceof Error ? error.message : String(error) })
-          .warn('Contact name lookup failed; using last known name');
+        log.withFields({ openId, error: message }).warn('Contact name lookup failed; using last known name');
       })
       .finally(() => {
         entry.inFlight = undefined;

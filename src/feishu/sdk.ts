@@ -44,7 +44,14 @@ const createSdkLogger = (logger: Logger, redact: (text: string) => string): lark
   const log = logger.withContext('feishu:sdk');
   const format = (args: unknown[]): string => redact(args.map(describeLogArg).join(' '));
   return {
-    error: (...args: unknown[]) => log.error(format(args)),
+    // A failed HTTP request is also thrown to our caller as a FeishuApiError,
+    // which decides how loud it is (a 41050 contact miss is routine); the SDK's
+    // own copy of the error would only duplicate it at error level.
+    error: (...args: unknown[]) => {
+      const text = format(args);
+      if (text.includes('Request failed with status code')) log.debug(text);
+      else log.error(text);
+    },
     warn: (...args: unknown[]) => log.warn(format(args)),
     info: (...args: unknown[]) => log.log(format(args)),
     debug: (...args: unknown[]) => log.debug(format(args)),

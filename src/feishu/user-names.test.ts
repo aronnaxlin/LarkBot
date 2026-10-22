@@ -1,6 +1,7 @@
 import { Format, initLogger, LogLevel, useLogger } from '@guiiai/logg';
 import { describe, expect, it, vi } from 'vitest';
 
+import { FeishuApiError } from './api';
 import { createFeishuUserNames } from './user-names';
 
 initLogger(LogLevel.Error, Format.Pretty);
@@ -77,6 +78,36 @@ describe('createFeishuUserNames', () => {
       expect(await names.resolve('oc_chat', 'ou_liu')).toBe('刘宇泽');
       expect(await names.resolve('oc_chat', 'ou_lu')).toBe('鹿饮');
       expect(fetchChatMemberNames).toHaveBeenCalledTimes(1);
+    });
+
+    it('treats an out-of-contact-range miss (41050) as settled for the refresh window', async () => {
+      let clock = 0;
+      const fetchName = vi.fn(async (): Promise<string | undefined> => {
+        throw new FeishuApiError('contact.user.get', { code: 41050, httpStatus: 400 });
+      });
+      const fetchChatMemberNames = vi.fn(async () => new Map([['ou_ext', 'Ext']]));
+      const names = createFeishuUserNames({
+        fetchName, fetchChatMemberNames, logger, now: () => clock, refreshMs: 10_000, failureBackoffMs: 100,
+      });
+      expect(await names.resolve('oc_chat', 'ou_ext')).toBe('Ext');
+      clock = 5_000;
+      expect(await names.resolve('oc_chat', 'ou_ext')).toBe('Ext');
+      expect(fetchName).toHaveBeenCalledTimes(1);
+      clock = 10_001;
+      await names.resolve('oc_chat', 'ou_ext');
+      expect(fetchName).toHaveBeenCalledTimes(2);
+    });
+
+    it('retries other contact failures after the shorter failure backoff', async () => {
+      let clock = 0;
+      const fetchName = vi.fn(async (): Promise<string | undefined> => {
+        throw new FeishuApiError('contact.user.get', { httpStatus: 503 });
+      });
+      const names = createFeishuUserNames({ fetchName, logger, now: () => clock, refreshMs: 10_000, failureBackoffMs: 100 });
+      await names.resolve('oc_chat', 'ou_x');
+      clock = 101;
+      await names.resolve('oc_chat', 'ou_x');
+      expect(fetchName).toHaveBeenCalledTimes(2);
     });
 
     it('does not fetch the member list when the contact API has the name', async () => {

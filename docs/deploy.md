@@ -1,7 +1,7 @@
-# Deploying LarkBot with Docker Compose
+# Deploying LuckyBot with Docker Compose
 
 Target: a small single-host deployment (an arm64 Debian 13 box with 4 cores,
-~900 MB RAM and a few GB free disk) where LarkBot runs in Feishu mode and its
+~900 MB RAM and a few GB free disk) where LuckyBot runs in Feishu mode and its
 Bash tool executes in a separate sandbox container.
 
 This runbook is the operational counterpart to the image sources:

@@ -91,7 +91,7 @@ The Driver serializes tool calls per chat. Each invocation queries current state
 
 Confirmed deletions and messages already unavailable to the bot update the platform archive and emit canonical delete events through the event sink without waking Driver. Repeating publication is safe for Projection. A subsequent userbot delete echo is also harmless. No direct IC mutation is allowed.
 
-The tool result requires model follow-up. After a confirmed ban, the tool result supplies an exact announcement with a `tg://user?id=...` link labeled "spam 账号". Primary calls `send_message` with exactly one argument, `text`, containing that announcement. Names, usernames, profile text, spam content, media, and audit reasoning stay in the private assessment. Partial cleanup receives its own factual announcement.
+The tool result requires model follow-up. After a confirmed ban, the tool result supplies an exact announcement with a `tg://user?id=...` link labeled "spam 账号" ("spam account"). Primary calls `send_message` with exactly one argument, `text`, containing that announcement. Names, usernames, profile text, spam content, media, and audit reasoning stay in the private assessment. Partial cleanup receives its own factual announcement.
 
 ## Downloads
 

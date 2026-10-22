@@ -1,154 +1,154 @@
-# 飞书接入实现说明（第一版）
+# Feishu Integration Implementation Notes (First Version)
 
 > Historical agent handoff snapshot. Coordinator changes supersede the integration TODOs and budget/error guarantees below; see [integration-status.md](integration-status.md) for current behavior and verification.
 
-日期：2026-10-16 · 分支：`feat/feishu-adapter` · 状态：已实现，离线测试通过；**未联机验证**（没有读取真实凭证，没有建立 WS 连接，没有发送消息）。
+Date: 2026-10-16 · Branch: `feat/feishu-adapter` · Status: implemented, offline tests pass; **not verified online** (no real credentials were read, no WS connection was made, no message was sent).
 
-> 2026-10-17 补充（`feat/feishu-images`）：入站图片已接入 canonical 附件与 `read_image(file_id)` / `download_file`，见 §1.1、§2、§9.5。
+> Addendum 2026-10-17 (`feat/feishu-images`): inbound images are wired into canonical attachments and `read_image(file_id)` / `download_file`; see §1.1, §2, §9.5.
 
-> 2026-10-17 联机验证：真实群聊里已跑通 @ 提及、图片 `read_image`、引用回复、表情、synthetic self-event、重启回放/去重和断线重连。通讯录昵称 API 对权限范围外的成员返回 `41050`，昵称回退为早前见过的名字；图片仍无被动描述。
+> Online verification 2026-10-17: in a real group chat, @-mentions, image `read_image`, quote-replies, reactions, synthetic self-events, restart replay/deduplication and reconnection after disconnects all worked. The contacts display-name API returns `41050` for members outside the permission scope, and the name falls back to one seen earlier; images still have no passive description.
 
-本文记录第一版飞书接入实际实现了什么、怎么配置、怎么手动联调，以及已知限制。调研背景见调研报告（`research-feishu-integration` 分支的 `docs/feishu-integration-research.md`）。
+This document records what the first version of the Feishu integration actually implements, how to configure it, how to debug it by hand, and the known limitations. For the research background see the research report (`docs/feishu-integration-research.md` on the `research-feishu-integration` branch).
 
-## 1. 范围
+## 1. Scope
 
-### 已实现
+### Implemented
 
-- 只接收**已配置的群聊**（`chats` 中的 `oc_...` 键）。私聊和未配置的群直接丢弃，不归档。注意这与 Telegram 不同：Telegram 会归档未配置的会话。
-- 入站消息类型：`text`、`post`、`image`。文本中的 `@_user_N` / `@_all` 占位符、post 中的 `at` 元素都转换为 `mention` 节点，`userId` 是 open_id，因此 Rendering 能正确计算 `mentionsMe`。post 的粗体、斜体、下划线、删除线、行内代码、链接、代码块都会保留。
-- 其他消息类型（文件、语音、视频、表情包、卡片、合并转发等）显示为 `[image]`、`[unsupported message type: x]` 这类占位文本，不带附件（图片除外，见 §1.1）。
-- 引用：`parent_id` 映射为 `replyToMessageId`。引用内容复用 Projection 的 IC 快照，只有父消息已在上下文中时才能显示；不另外调用 API 拉取父消息。
-- 撤回：`im.message.recalled_v1` 映射为 canonical `delete`。
-- 发送者身份：`CanonicalUser.id` 取 open_id（应用内稳定）；`isBot = sender_type !== 'user'`。昵称来源依次是通讯录 API（等待上限 1 秒，结果缓存 6 小时，失败后 10 分钟内不重试）；通讯录拿不到名字时，用本群成员列表（`im.v1.chatMembers.get`，只需群权限，也能覆盖通讯录范围外和外部成员，不含机器人；按群缓存 6 小时，等待上限同样 1 秒，列表里没有此人时 10 分钟后才重新拉取）；再往后是本进程见过的 @ 名字、IC 中的历史名字；都没有时为空，Rendering 回退显示 open_id。已存档消息保留当时的发送者快照，不会因为后来学到名字而改写（保持前缀缓存稳定）；需要给历史消息补名字时用 `contacts.json`。
-- 发送：`post` 消息，内容是单个 `md` 元素（CommonMark + GFM）；有 `reply_to` 时调用 reply 接口。
-- 发送 @：模型在 `send_message` 文本里写 `<at user_id="ou_...">名字</at>`，`src/feishu/post-content.ts` 校验后原样放进 `md` 元素（飞书 md 扩展语法）。open_id 必须是本群见过的参与者（本进程见过的发送者或被 @ 者，或 IC 中的历史发送者），否则工具报错；不支持 @所有人；代码块和行内代码里的标签按字面发送。飞书模式下 chatlog 的 `<message>` 带 `uid` 属性，供模型复制 open_id；Telegram 渲染不变。
-- Synthetic self-event：每次发送成功后，用服务端返回的 `message_id` 写入一条 `isSelfSent=true` 的 canonical 事件，再发布到 Pipeline，不唤醒 Driver。飞书不会把机器人自己的消息推回来，所以机器人只能通过这条路径看到自己说过的话。
-- 去重和崩溃恢复，见 §3。
-- 表情：为常用 Unicode emoji 做了 `emoji_type` 映射（第一版 30 个，2026-10-17 又补约 37 个，含 😏 `SMIRK`、😎 `SMART`）。未映射的 emoji 直接报错，不会假装成功；移除表情需要本进程记录的 `reaction_id`，重启后无法移除或替换之前加的表情，同样会报错。
+- Only **configured group chats** are received (the `oc_...` keys in `chats`). Private chats and unconfigured groups are dropped without being archived. Note that this differs from Telegram, which archives unconfigured conversations.
+- Inbound message types: `text`, `post`, `image`. The `@_user_N` / `@_all` placeholders in text and the `at` elements in a post are converted to `mention` nodes whose `userId` is an open_id, so Rendering can compute `mentionsMe` correctly. A post's bold, italic, underline, strikethrough, inline code, links and code blocks are all preserved.
+- Other message types (files, audio, video, stickers, cards, merged forwards, etc.) are shown as placeholder text such as `[image]` or `[unsupported message type: x]`, with no attachment (images are the exception, see §1.1).
+- Quotes: `parent_id` maps to `replyToMessageId`. The quoted content reuses the Projection's IC snapshot, so it can only be shown when the parent message is already in context; no API call is made to fetch the parent message.
+- Recalls: `im.message.recalled_v1` maps to a canonical `delete`.
+- Sender identity: `CanonicalUser.id` is the open_id (stable within the app); `isBot = sender_type !== 'user'`. Display names come from the following sources in order: the contacts API (wait capped at 1 second, result cached for 6 hours, no retry for 10 minutes after a failure); if the contacts API cannot give a name, the chat's member list (`im.v1.chatMembers.get`, which needs only the chat permission, also covers members outside the contacts scope and external members, and does not include bots; cached per chat for 6 hours, wait capped at the same 1 second, and if the person is not in the list it is only refetched after 10 minutes); after that, names seen in @-mentions in this process and historical names in the IC; if none exists the name is empty and Rendering falls back to showing the open_id. Archived messages keep the sender snapshot of the time and are not rewritten when a name is learned later (to keep the prefix cache stable); to backfill names on historical messages use `contacts.json`.
+- Sending: a `post` message whose content is a single `md` element (CommonMark + GFM); when `reply_to` is present the reply endpoint is called.
+- Sending @-mentions: the model writes `<at user_id="ou_...">name</at>` in the `send_message` text, and `src/feishu/post-content.ts` validates it and places it unchanged into the `md` element (Feishu's md extension syntax). The open_id must belong to a participant seen in this chat (a sender or mentioned user seen by this process, or a historical sender in the IC), otherwise the tool reports an error; @-all is not supported; tags inside code blocks and inline code are sent literally. In Feishu mode the chatlog's `<message>` carries a `uid` attribute from which the model copies the open_id; Telegram rendering is unchanged.
+- Synthetic self-event: after every successful send, the `message_id` returned by the server is used to write a canonical event with `isSelfSent=true`, which is then published to the Pipeline without waking the Driver. Feishu does not push the bot's own messages back, so this path is the only way the bot sees what it said.
+- Deduplication and crash recovery, see §3.
+- Reactions: a mapping from common Unicode emoji to `emoji_type` (30 in the first version, about 37 more added on 2026-10-17, including 😏 `SMIRK` and 😎 `SMART`). An unmapped emoji errors out directly and does not pretend to succeed; removing a reaction needs the `reaction_id` recorded by this process, so after a restart a reaction added earlier cannot be removed or replaced, which likewise errors.
 
-### 1.1 入站图片与 file_id
+### 1.1 Inbound images and file_id
 
-- `image` 消息的 `image_key`，以及 post 中每个 `tag=img` 元素的 `image_key`，都会转成 canonical photo 附件。`image_key` 作为附件对象上的 `fileKey` 属性一起持久化到 `events.attachments`，下载时用它调消息资源接口。post 的 `media` 元素虽然也带 `image_key`（视频封面），但不会被当成图片。
-- 图片不再产生 `[image]` 占位文本；解析失败（拿不到 key）时才保留占位符。
-- Rendering 按共享规则把附件渲染成 `<attachment type="photo" ... file-id="<message_id>:<index>"/>`（多图 post 每个图一个 index），模型把这个 `file-id` 传给 `read_image` / `download_file`。下载链路：`file-id` → `(message_id, index)` → 从已落库事件取第 index 个附件的 `image_key` → `GET /open-apis/im/v1/messages/{message_id}/resources/{image_key}?type=image`。共享下载器会校验 `0 <= index < attachments.length`，越界报平台无关的错误。
-- 下载在流式读取时 20 MB 截断（`readMessageResourceStream`），Content-Length 超限会在读流前直接拒绝，否则边读边计数；总读取超时 30 s，到点 destroy 流。超限/超时是本模块自己的错误，原样返回；流中途的传输错误会过一遍 `toApiError` 再返回模型，避免把请求细节带进工具结果。
-- 2026-10-17 联机验证：真实群聊图片已用 `read_image(file_id)` 成功读取；多图 post、尺寸与 MIME 未逐项核对。
+- The `image_key` of an `image` message, and the `image_key` of every `tag=img` element in a post, are converted to canonical photo attachments. The `image_key` is persisted to `events.attachments` as the `fileKey` property on the attachment object, and is used to call the message-resource endpoint when downloading. A post's `media` element also carries an `image_key` (the video cover), but is not treated as an image.
+- Images no longer produce `[image]` placeholder text; the placeholder is only kept when parsing fails (the key cannot be obtained).
+- Rendering follows the shared rules and renders the attachment as `<attachment type="photo" ... file-id="<message_id>:<index>"/>` (one index per image in a multi-image post), and the model passes this `file-id` to `read_image` / `download_file`. The download path: `file-id` → `(message_id, index)` → take the `image_key` of the index-th attachment from the stored event → `GET /open-apis/im/v1/messages/{message_id}/resources/{image_key}?type=image`. The shared downloader checks `0 <= index < attachments.length` and reports a platform-independent error when out of range.
+- Downloads are cut off at 20 MB while the stream is read (`readMessageResourceStream`): a Content-Length over the limit is rejected before the stream is read, otherwise bytes are counted as they are read; the total read timeout is 30 s, and the stream is destroyed when it expires. Exceeding the limit or the timeout are this module's own errors and are returned as they are; a transport error in the middle of the stream goes through `toApiError` before being returned to the model, to avoid carrying request details into the tool result.
+- Online verification 2026-10-17: a real group-chat image was read successfully with `read_image(file_id)`; multi-image posts, sizes and MIME types were not checked one by one.
 
-### 未实现（后续工作）
+### Not implemented (future work)
 
-媒体出站（发送附件）、图片的被动描述（`imageToText` 不会自动为收到的图片生成 alt text，模型必须显式调用 `read_image(file_id)`）、消息编辑同步（飞书没有编辑事件）、话题 / `thread_id`、断线补洞（拉取历史）、成员进出与群改名等服务事件、入站表情事件、私聊、卡片与流式输出、`ban_spammer`、正在输入提示、发送超长消息时自动分片。
+Outbound media (sending attachments), passive description of images (`imageToText` does not automatically generate alt text for received images; the model must call `read_image(file_id)` explicitly), message-edit sync (Feishu has no edit event), topics / `thread_id`, gap filling after disconnects (fetching history), service events such as members joining and leaving and group renames, inbound reaction events, private chats, cards and streaming output, `ban_spammer`, typing indicators, and automatic chunking of overlong messages on send.
 
-`read_image` 一直保留，因为它的 `path` 参数仍然可用。飞书模式下 `download_file` 和 `read_image(file_id)` 已暴露（需要 `im:resource`），`send_message.attachments` 不暴露（`supportsOutboundAttachments` 未声明）；实际取字节前如果附件没有 `fileKey`（升级前归档的旧消息），会得到一条明确的错误。`ban_spammer` 在飞书模式不暴露。
+`read_image` has always been kept, because its `path` parameter still works. In Feishu mode `download_file` and `read_image(file_id)` are exposed (they need `im:resource`), and `send_message.attachments` is not exposed (`supportsOutboundAttachments` is not declared); if an attachment has no `fileKey` when the bytes are about to be fetched (an old message archived before the upgrade), a clear error is returned. `ban_spammer` is not exposed in Feishu mode.
 
-## 2. 公共接缝（供父 agent 审查）
+## 2. Shared seams (for the parent agent to review)
 
-| 接缝 | 位置 | 说明 |
+| Seam | Location | Notes |
 | --- | --- | --- |
-| `DriverPlatform` | `src/driver/platform.ts` | Driver 面向平台的能力集合。消息 ID 一律是 string。可选成员（入站 `loadMessageAttachments`+`downloadMessageMedia`、出站 `supportsOutboundAttachments`、`banSpammer`）缺失时，对应工具和参数不暴露给模型。`createDriver` 的 deps 是 `Omit<DriverPlatform,'name'>` 再加上原有依赖，字段名与之前保持一致（平铺）。 |
-| Telegram 适配 | `src/telegram/driver-platform.ts` | 只有这里会把 string 转回 TDLib 用的 number（`parseTelegramMessageId` / `requireTelegramMessageId`，位于 `message/id-conversion.ts`）。非数字 ID 不会传到 TDLib。 |
-| 平台生命周期 | `src/startup/platform.ts` | `PlatformIdentity`（`prepare`、`botUserId`）和 `PlatformRuntime`（`startIngress`、`start`、`stop`、`runPostStartup`）。startup 不再引用 Telegram token。 |
-| 平台选择 | `src/container/registrars/platform.ts` | 根据 `config.platform` 把 `PLATFORM_IDENTITY`、`PLATFORM_RUNTIME`、`DRIVER_PLATFORM` 解析到对应实现。工厂是惰性的，未选中的平台不会被构造。 |
-| TDLib 惰性化 | `src/container/registrars/telegram.ts` | `tdl.configure` 从 `startup/index.ts` 的模块顶层挪到 `TELEGRAM_CLIENTS` 工厂里，飞书模式不会加载 libtdjson。 |
-| EventSink | `src/event-sink.ts` | 原 `src/telegram/event-sink.ts` 原样移动并改名（`TelegramEventSink` → `EventSink`，token 改为 `EVENT_SINK`），逻辑不变。 |
-| 去重键 | `events.dedup_key` + 唯一索引 `(chat_id, dedup_key)` | 迁移 `drizzle/0033_events_dedup_key.sql`。Telegram 写入 NULL，SQLite 中多个 NULL 不冲突。新增 `persistDedupedEvent`、`hasEventDedupKey`、`canonicalMessageExists`。 |
-| 工具 | `send-message.ts`、`react.ts`、`attachment-downloader.ts`、`ban-spammer.ts` | 改为 string ID；`file-id` 按最后一个冒号拆分，消息 ID 部分不再要求是数字；错误信息中的 “TDLib” 改为 “the platform API”。 |
-| 飞书入站附件 | `src/feishu/{content,adaptation,driver-platform,api,sdk}.ts` + `container/registrars/feishu.ts` | `parseFeishuAttachments` 提取 `image_key`，adaptation 写入共享 `CanonicalAttachment.fileKey`。registrar 把 `loadMessageAttachments`（用 `loadEventsByMessageIds` 同步读归档附件）和 `getMessageResource`（SDK 字节传输）接给 `createFeishuDriverPlatform`；两者成对出现，入站能力生效。 |
-| 消息资源下载 | `FeishuApi.getMessageResource` + `src/feishu/sdk.ts` | 调 `client.im.v1.messageResource.get`，返回流由 `readMessageResourceStream` 读成 Buffer：20 MB 上限（Content-Length 预检 + 边读边计数）、30 s 总读取超时、错误按本地错误 vs `toApiError` 分流。 |
+| `DriverPlatform` | `src/driver/platform.ts` | The set of platform-facing capabilities of the Driver. Message IDs are always strings. When the optional members (inbound `loadMessageAttachments`+`downloadMessageMedia`, outbound `supportsOutboundAttachments`, `banSpammer`) are missing, the corresponding tools and parameters are not exposed to the model. The `createDriver` deps are `Omit<DriverPlatform,'name'>` plus the original dependencies, and the field names stay as before (flat). |
+| Telegram adaptation | `src/telegram/driver-platform.ts` | The only place that converts strings back to the numbers TDLib uses (`parseTelegramMessageId` / `requireTelegramMessageId`, in `message/id-conversion.ts`). Non-numeric IDs never reach TDLib. |
+| Platform lifecycle | `src/startup/platform.ts` | `PlatformIdentity` (`prepare`, `botUserId`) and `PlatformRuntime` (`startIngress`, `start`, `stop`, `runPostStartup`). Startup no longer references the Telegram token. |
+| Platform selection | `src/container/registrars/platform.ts` | Resolves `PLATFORM_IDENTITY`, `PLATFORM_RUNTIME` and `DRIVER_PLATFORM` to the matching implementation according to `config.platform`. The factories are lazy; a platform that is not selected is never constructed. |
+| Lazy TDLib | `src/container/registrars/telegram.ts` | `tdl.configure` moved from the module top level of `startup/index.ts` into the `TELEGRAM_CLIENTS` factory, so Feishu mode does not load libtdjson. |
+| EventSink | `src/event-sink.ts` | The former `src/telegram/event-sink.ts`, moved and renamed unchanged (`TelegramEventSink` → `EventSink`, token changed to `EVENT_SINK`); logic unchanged. |
+| Dedup key | `events.dedup_key` + unique index `(chat_id, dedup_key)` | Migration `drizzle/0033_events_dedup_key.sql`. Telegram writes NULL, and multiple NULLs do not conflict in SQLite. Added `persistDedupedEvent`, `hasEventDedupKey`, `canonicalMessageExists`. |
+| Tools | `send-message.ts`, `react.ts`, `attachment-downloader.ts`, `ban-spammer.ts` | Changed to string IDs; `file-id` is split at the last colon and the message ID part no longer has to be numeric; "TDLib" in error messages was changed to "the platform API". |
+| Feishu inbound attachments | `src/feishu/{content,adaptation,driver-platform,api,sdk}.ts` + `container/registrars/feishu.ts` | `parseFeishuAttachments` extracts the `image_key`, and adaptation writes it into the shared `CanonicalAttachment.fileKey`. The registrar wires `loadMessageAttachments` (synchronously reads archived attachments with `loadEventsByMessageIds`) and `getMessageResource` (SDK byte transport) into `createFeishuDriverPlatform`; the two come as a pair, and the inbound capability takes effect. |
+| Message-resource download | `FeishuApi.getMessageResource` + `src/feishu/sdk.ts` | Calls `client.im.v1.messageResource.get`, and the returned stream is read into a Buffer by `readMessageResourceStream`: 20 MB limit (Content-Length precheck + counting while reading), 30 s total read timeout, and errors are routed as local errors vs `toApiError`. |
 
-刻意没有做：通用插件框架、平台注册中心、预留字段、用 SDK 的 `Channel`。SDK 的 `normalize()` 也没有用：它会把 mention 压平成 `@名字` 文本，默认还会删掉对机器人的 @，丢失 open_id 和位置，`mentionsMe` 就无法计算。
+Deliberately not done: a generic plugin framework, a platform registry, reserved fields, using the SDK's `Channel`. The SDK's `normalize()` is not used either: it flattens mentions into `@name` text and by default deletes @-mentions of the bot, which loses the open_id and the position, so `mentionsMe` could not be computed.
 
-## 3. 去重与崩溃恢复
+## 3. Deduplication and crash recovery
 
-- 去重键按动作区分：`message:<message_id>`、`recall:<message_id>`。撤回不会被同一条消息的去重键吞掉，反之亦然。
-- WS 事件处理器（SDK 等处理器 resolve 后才 ack）在 canonical 事件**落库之后**才返回，所以已经 ack 的事件不会丢。
-- 同一 chat 内串行处理，Pipeline 发布顺序与到达顺序一致。
-- 并发重复投递：第二次投递等待第一次的结果，并返回同样的结果。
-- 落库成功、发布前崩溃：重启后冷回放从 `events` 表重建；之后的重复投递会被去重键跳过。
-- 进程内发布失败：已落库的事件留在内存里，处理器抛错，飞书会重推；重推到达时只补发布，不重复写库。
-- 格式错误的事件只记日志并 ack，因为重推也不会成功。
-- 发送：每条逻辑消息一个 `uuid`，同一次发送的所有重试复用它，下一条消息换新的。只对 99991400 限流、HTTP 429/5xx、无响应重试，最多 2 次（间隔 1 秒和 3 秒），最终错误原样返回给工具结果，不会无限静默重试。
-- 发送成功但 self-event 写入失败时只记 error 日志，不让工具报错，避免模型重发同一条消息。
+- Dedup keys are distinguished by action: `message:<message_id>`, `recall:<message_id>`. A recall is not swallowed by the dedup key of the same message, and vice versa.
+- The WS event handler (the SDK acks only after the handler resolves) returns only **after** the canonical event has been persisted, so an event that has been acked is not lost.
+- Processing is serial within a chat, and the Pipeline publication order matches the arrival order.
+- Concurrent duplicate delivery: the second delivery waits for the result of the first and returns the same result.
+- Crash after persisting but before publishing: after a restart, cold replay rebuilds from the `events` table; later duplicate deliveries are skipped by the dedup key.
+- In-process publication failure: the persisted event stays in memory and the handler throws, so Feishu pushes again; when the re-push arrives only the publication is redone and nothing is written to the database twice.
+- Malformed events are only logged and acked, because a re-push would not succeed either.
+- Sending: one `uuid` per logical message, reused by all retries of the same send, and replaced for the next message. Only 99991400 rate limiting, HTTP 429/5xx and no response are retried, at most 2 times (after 1 second and 3 seconds); the final error is returned to the tool result as it is, and there is no unbounded silent retry.
+- If the send succeeds but writing the self-event fails, only an error log is written and the tool does not report an error, to keep the model from resending the same message.
 
-## 4. 运行配置
+## 4. Runtime configuration
 
-`config.yaml`：
+`config.yaml`:
 
 ```yaml
 platform: feishu
 feishu:
-  appId: "cli_xxxxxxxxxxxxxxxx"   # 必须形如 cli_ + 16 位十六进制
+  appId: "cli_xxxxxxxxxxxxxxxx"   # must look like cli_ + 16 hex digits
   appSecret: ""
-  domain: "feishu"                # 可选：feishu（默认）、lark 或 https:// 基础 URL
+  domain: "feishu"                # optional: feishu (default), lark, or an https:// base URL
 chats:
   default:
-    sendTypingAction: false   # 飞书没有机器人“正在输入”API；保持 true 也只是空操作
-    # tools.banSpammer 必须为 false，否则启动时报错
-  "oc_xxx": {}               # 目标群 chat_id
+    sendTypingAction: false   # Feishu has no bot "typing" API; leaving true is only a no-op
+    # tools.banSpammer must be false, otherwise startup reports an error
+  "oc_xxx": {}               # chat_id of the target group
 ```
 
-- 飞书模式下不需要 `telegram` 段；Telegram 模式（默认）仍然必填。
-- 飞书模式下 `feishu` 段必填，凭证和 Telegram token、模型 API key 一样写在 `config.yaml` 里（该文件已被 git 忽略）。群 ID 写在 `chats` 里。
-- 凭证值只在内存中使用：不写入 `process.env`（bash 工具的子进程会继承它），校验报错只说明哪个字段不合法、不回显取值，SDK 日志会删掉 `config`、`headers`、`*token*`、`app_secret` 等字段，再替换掉 app secret 本身。
+- The `telegram` section is not needed in Feishu mode; it is still required in Telegram mode (the default).
+- In Feishu mode the `feishu` section is required, and the credentials are written in `config.yaml` just like the Telegram token and the model API keys (that file is git-ignored). The group IDs go in `chats`.
+- Credential values are only used in memory: they are not written to `process.env` (the child processes of the bash tool would inherit it), a validation error says only which field is invalid and does not echo the value, and the SDK logs drop fields such as `config`, `headers`, `*token*` and `app_secret` and then replace the app secret itself.
 
-## 5. 飞书后台需要的权限与事件
+## 5. Permissions and events needed in the Feishu console
 
-最小集如下，需要发布版本后生效；`im:message.group_msg` 是敏感权限，可能要管理员审批：
+The minimum set is as follows and takes effect after a version is published; `im:message.group_msg` is a sensitive permission and may need administrator approval:
 
-- 接收群消息：`im:message.group_msg`（旁听全部群消息）；只开 `im:message.group_at_msg:readonly` 时只能收到 @ 机器人的消息。
-- 发送和回复：`im:message:send_as_bot`。
-- 撤回事件：`im:message` 或 `im:message:readonly`。
-- 表情：`im:message.reactions:write_only`（或 `im:message`）。
-- 下载消息里的图片 / 文件资源（`read_image(file_id)`、`download_file`）：`im:resource`。缺这个权限时资源接口会返回权限错误；已在 2026-10-17 联机读取真实图片。
-- 昵称：通讯录读取权限（`contact.user.get`，如 `contact:user.base:readonly`）。该权限已开通，但还必须把「通讯录权限范围」（contact data range）配成包含群成员：范围外的成员返回 `41050` "no user authority"，此时改用群成员列表的名字（见 §1），再没有才回退为早前见过的名字或 open_id。
-- 事件订阅方式选“长连接”，订阅 `im.message.receive_v1`、`im.message.recalled_v1`。
-- 一个应用只能运行一个长连接消费者：不要同时运行第二个 LarkBot 进程或 `lark-cli event consume`，否则事件会被随机分到其中一个。
+- Receiving group messages: `im:message.group_msg` (listening to all group messages); with only `im:message.group_at_msg:readonly` enabled, only messages that @-mention the bot are received.
+- Sending and replying: `im:message:send_as_bot`.
+- Recall events: `im:message` or `im:message:readonly`.
+- Reactions: `im:message.reactions:write_only` (or `im:message`).
+- Downloading image / file resources in messages (`read_image(file_id)`, `download_file`): `im:resource`. Without this permission the resource endpoint returns a permission error; a real image was read online on 2026-10-17.
+- Display names: contacts read permission (`contact.user.get`, such as `contact:user.base:readonly`). This permission has been granted, but the "contact data range" (通讯录权限范围, "contact data range") must also be configured to include the group members: members outside the range return `41050` "no user authority", in which case the names from the chat member list are used instead (see §1), and failing that the name falls back to one seen earlier or the open_id.
+- Choose "long connection" as the event subscription method, and subscribe to `im.message.receive_v1` and `im.message.recalled_v1`.
+- An app can run only one long-connection consumer: do not run a second LuckyBot process or `lark-cli event consume` at the same time, otherwise events are randomly distributed to one of them.
 
-## 6. 离线验证结果
+## 6. Offline verification results
 
-依赖已安装：执行 `pnpm install --frozen-lockfile --ignore-scripts`，然后 `pnpm rebuild` 了 better-sqlite3、sharp、esbuild、unrs-resolver、ffmpeg-static，并运行 `pnpm tdlib:types`。SDK 通过 `pnpm add @larksuiteoapi/node-sdk@1.76.0` 加入。本机缺少 `rlottie` 头文件，lottie-frame 没有编译。
+Dependencies installed: `pnpm install --frozen-lockfile --ignore-scripts` was run, then `pnpm rebuild` for better-sqlite3, sharp, esbuild, unrs-resolver and ffmpeg-static, and `pnpm tdlib:types` was run. The SDK was added with `pnpm add @larksuiteoapi/node-sdk@1.76.0`. The `rlottie` headers are missing on this machine, so lottie-frame was not compiled.
 
-- `pnpm lint`：通过。
-- `pnpm build`：通过。
-- `pnpm test:run`：490 个测试中 486 个通过。4 个失败都与本分支无关：3 个 TGS 测试需要原生 lottie-frame；`probe-vs-primary` 中断言 “evaluator's notes” 的那个测试，在本分支未改动的 prompt 和测试文件上同样失败。
-- `pnpm typecheck`：剩 5 个错误。4 个是 §9.2 中两个 Driver 行为测试的类型补丁（不在本线修改范围内）；1 个是已有的 `markdown-it-math-loose` 缺少类型声明。
-- 新增测试：`src/feishu/{content,user-names,reactions,ingress}.test.ts`、`src/telegram/driver-platform.test.ts`、`src/config/platform-config.test.ts`、`src/container/feishu-mode.test.ts`。最后一个用合成凭证和 mock 掉的 SDK 构建完整容器，并断言 `tdl.configure` 和 `tdl.createClient` 都没有被调用。
-- 离线确认：node-sdk 1.76.0 的 CJS 命名导出在 Node ESM 和 tsx 下都能通过 `import * as lark` 取到。
+- `pnpm lint`: passes.
+- `pnpm build`: passes.
+- `pnpm test:run`: 486 of 490 tests pass. The 4 failures are all unrelated to this branch: 3 TGS tests need the native lottie-frame; the test in `probe-vs-primary` that asserts "evaluator's notes" fails the same way on the prompt and test file this branch did not touch.
+- `pnpm typecheck`: 5 errors remain. 4 are the type patches for the two Driver behaviour tests in §9.2 (outside this line's scope to change); 1 is the existing missing type declaration for `markdown-it-math-loose`.
+- New tests: `src/feishu/{content,user-names,reactions,ingress}.test.ts`, `src/telegram/driver-platform.test.ts`, `src/config/platform-config.test.ts`, `src/container/feishu-mode.test.ts`. The last one builds the full container with synthetic credentials and a mocked SDK, and asserts that neither `tdl.configure` nor `tdl.createClient` was called.
+- Confirmed offline: the CJS named exports of node-sdk 1.76.0 can be obtained through `import * as lark` under both Node ESM and tsx.
 
-2026-10-17 图片接入后重跑（`feat/feishu-images`）：`pnpm typecheck`、`pnpm lint`、`pnpm test:run`（53 files / 527 tests）、`pnpm build` 全部通过。测试覆盖：图片解析、附件能力配对、按 index 下载（含多图 post）、无 `fileKey` 不变式错误、`send_message.attachments` 能力拆分、20 MB 上限与 Content-Length 预检、30 s 超时与流销毁、中途错误的脱敏、registrar 端到端接线（图片事件 → `events.attachments.fileKey` → `getMessageResource` 下载）。`client.im.v1.messageResource.get` 只做了类型检查和模拟 SDK 的单元测试，没有联机验证。
+Re-run after the image integration on 2026-10-17 (`feat/feishu-images`): `pnpm typecheck`, `pnpm lint`, `pnpm test:run` (53 files / 527 tests) and `pnpm build` all pass. Test coverage: image parsing, attachment capability pairing, download by index (including multi-image posts), the invariant error for a missing `fileKey`, the `send_message.attachments` capability split, the 20 MB limit and the Content-Length precheck, the 30 s timeout and stream destruction, redaction of mid-stream errors, and end-to-end registrar wiring (image event → `events.attachments.fileKey` → `getMessageResource` download). `client.im.v1.messageResource.get` was only type-checked and unit-tested against a mocked SDK, and was not verified online.
 
-## 7. 手动联调步骤（需用户另行确认后执行）
+## 7. Manual debugging steps (to be run only after separate confirmation from the user)
 
-1. 依赖安装同上。完整安装需要先装系统包 `rlottie`（只影响 Telegram TGS 贴纸）。
-2. 运行 `pnpm typecheck && pnpm lint && pnpm test:run && pnpm build`。
-3. 准备 `config.yaml`（见 §4），先只配一个测试群。
-4. 运行 `pnpm start`，日志里应出现 `Feishu long connection ready` 和 `Cahciua is running`；不应加载 TDLib。
-5. 在群里依次验证：普通发言入库（`events` 表出现 `dedup_key = 'message:om_...'`）；@ 机器人时 RC 中带 `mentionsMe`；引用机器人消息时带 `repliesToMe`；机器人回复后，`events` 中出现 `is_self_sent = 1` 的行；撤回后 RC 中该消息标记为 `deleted="true"`。
-6. 图片：发一张图片（以及一条多图 post），确认 `events.attachments` 里按顺序出现 `{"type":"photo","fileKey":"img_v3_..."}`，RC 中出现 `<attachment type="photo" ... file-id="om_...:0"/>`、`:1` 等；让机器人 `read_image` 其中任意一个 `file-id`（需要 `im:resource`；未联机验证）。
-7. 在处理过程中重启进程：确认没有重复事件、冷回放正确、重推被跳过。
-8. 验证表情：加一次、换一次、移除一次；再用一个未映射的 emoji 确认会报错。
-9. 连续快速发送，观察限流错误是否如实返回。
+1. Install dependencies as above. A full install needs the system package `rlottie` first (it only affects Telegram TGS stickers).
+2. Run `pnpm typecheck && pnpm lint && pnpm test:run && pnpm build`.
+3. Prepare `config.yaml` (see §4), configuring only one test group at first.
+4. Run `pnpm start`; the log should show `Feishu long connection ready` and `Cahciua is running`; TDLib should not be loaded.
+5. In the group, verify in turn: an ordinary message is stored (a `dedup_key = 'message:om_...'` appears in the `events` table); `mentionsMe` appears in the RC when the bot is @-mentioned; `repliesToMe` appears when a bot message is quoted; after the bot replies, a row with `is_self_sent = 1` appears in `events`; after a recall, the message is marked `deleted="true"` in the RC.
+6. Images: send an image (and a multi-image post), confirm that `{"type":"photo","fileKey":"img_v3_..."}` appears in order in `events.attachments`, and that `<attachment type="photo" ... file-id="om_...:0"/>`, `:1` and so on appear in the RC; have the bot `read_image` any of those `file-id`s (needs `im:resource`; not verified online).
+7. Restart the process during processing: confirm there are no duplicate events, cold replay is correct, and re-pushes are skipped.
+8. Verify reactions: add once, replace once, remove once; then use an unmapped emoji to confirm it errors.
+9. Send several messages in quick succession and watch whether rate-limit errors are returned faithfully.
 
-## 8. 未验证事项与限制
+## 8. Unverified items and limitations
 
-- `src/feishu/sdk.ts` 已通过类型检查，并已在 2026-10-17 联机使用。用到的接口有 `im.v1.message.create/reply`、`im.v1.messageReaction.create/delete`、`contact.v3.user.get`、`Client.request`（`/open-apis/bot/v3/info`）、`WSClient` 和 `EventDispatcher`。
-- 尚未确认 `feishu.domain` 的实际取值格式；值不符合 §4 中的格式时，启动会报错（错误信息不包含值）。
-- 机器人被 @ 时，`mentions[].id.open_id` 是否等于 `/bot/v3/info` 返回的 open_id：已在 2026-10-17 联机确认（@ 提及与 `mentionsMe` 正常）。
-- 收到的 post 中，`at` 元素按文档使用 `@_user_N` 占位符；代码同时兼容直接给出 open_id 的情况。
-- 文本消息里的 `[文本](url)` 链接按纯文本保留，不解析成链接节点。
-- 提示词仍写的是 Telegram（见 §9）。
-- 图片：`fileKey`（`image_key`）现在声明在共享的 `CanonicalAttachment` 和 `Attachment` 类型上；Telegram 不设置它，继续按 `(chatId, messageId)` 下载。
-- 图片下载：多图消息的每个 index 都可下载（共享下载器按 index 取附件）；已在 2026-10-17 联机验证真实图片下载，尺寸和 MIME 未逐项核对。
-- 入站图片能力已在 registrar 接好：`read_image(file_id)` / `download_file` 对飞书可用，但需要 `im:resource` 权限；已在 2026-10-17 联机验证。
-- `send_message.attachments` 在飞书不暴露：`DriverPlatform.supportsOutboundAttachments` 只在 Telegram 平台为 true，飞书没有声明，工具 schema 里也就没有 `attachments`。
-- 被动图片描述未接：`imageToText` 的自动描述链路需要 ingress 在落库前下载图片、生成 `thumbnailWebp` 并调用 `imageToText.resolve`，目前 `src/feishu/ingress.ts` 没有媒体运行时依赖（见 §9.5）。
-- `ban_spammer` 的 `tg://` 公告等 Telegram 专属逻辑保持不变，飞书模式下不启用。
+- `src/feishu/sdk.ts` passes type checking and was used online on 2026-10-17. The endpoints used are `im.v1.message.create/reply`, `im.v1.messageReaction.create/delete`, `contact.v3.user.get`, `Client.request` (`/open-apis/bot/v3/info`), `WSClient` and `EventDispatcher`.
+- The actual value format of `feishu.domain` has not been confirmed; a value that does not match the format in §4 makes startup report an error (the error message does not contain the value).
+- Whether `mentions[].id.open_id` equals the open_id returned by `/bot/v3/info` when the bot is @-mentioned: confirmed online on 2026-10-17 (@-mentions and `mentionsMe` work).
+- In received posts, `at` elements use the `@_user_N` placeholder per the documentation; the code also handles the case where the open_id is given directly.
+- A `[text](url)` link in a text message is kept as plain text and not parsed into a link node.
+- The prompts still say Telegram (see §9).
+- Images: `fileKey` (`image_key`) is now declared on the shared `CanonicalAttachment` and `Attachment` types; Telegram does not set it and keeps downloading by `(chatId, messageId)`.
+- Image download: every index of a multi-image message can be downloaded (the shared downloader takes the attachment by index); real image download was verified online on 2026-10-17, sizes and MIME types were not checked one by one.
+- The inbound image capability is wired in the registrar: `read_image(file_id)` / `download_file` are available for Feishu but need the `im:resource` permission; verified online on 2026-10-17.
+- `send_message.attachments` is not exposed on Feishu: `DriverPlatform.supportsOutboundAttachments` is true only for the Telegram platform, and Feishu does not declare it, so the tool schema has no `attachments`.
+- Passive image description is not wired: the automatic description path of `imageToText` needs the ingress to download the image before persisting, generate `thumbnailWebp` and call `imageToText.resolve`, and `src/feishu/ingress.ts` currently has no media-runtime dependency (see §9.5).
+- Telegram-specific logic such as the `tg://` announcement of `ban_spammer` is unchanged and not enabled in Feishu mode.
 
-## 9. 交给父 agent 集成的事项
+## 9. Items to hand to the parent agent for integration
 
-以下文件不在本线修改范围内，这里给出建议补丁：
+The following files are outside this line's scope to change; suggested patches are given here:
 
-1. **`src/driver/wakeup.ts` 的 `currentChannel`**（两处硬编码 `'telegram'`）。建议给 `executeWakeup` 增加参数 `currentChannel: string`，替换这两处 `currentChannel: 'telegram'`。`src/driver/index.ts` 调用时传入平台名，需要在 `createDriver` 的 deps 中加上 `platformName: DriverPlatform['name']`（`registrars/driver.ts` 中由 `platform.name` 提供）。本分支没有改 `wakeup.ts`，所以 deps 里暂时没有这个字段。
-2. **Driver 行为测试的类型补丁**：`src/driver/driver-characterization.test.ts` 和 `src/driver/probe-vs-primary.test.ts` 中，`sendMessage` mock 返回的 `messageId: 1` / `999` 是 number，类型上需要改成 `'1'` / `'999'`（多余的 `date` 字段可以留着）。这只影响 `tsc`，vitest 运行不受影响。其余 deps 字段名没变，`loadMessageAttachments`、`downloadMessageMedia`、`banSpammer` 只是变成了可选。
-3. **提示词**：`prompts/system.velin.md` 写的是 “Telegram group chat”、“Telegram-flavored Markdown” 和 `t.me` 链接前缀，`prompts/late-binding.velin.md` 写的是 “Telegram group chat”。建议按 `currentChannel` 分支：飞书输出的是 CommonMark + GFM（支持表格），不支持 Telegram 的 spoiler；@ 某人需要写 `<at user_id="ou_...">名字</at>`（现已接入，见 §1；模型写 `@名字` 仍只是纯文本）；不提供消息深链。
-4. **`AGENTS.md`**：Ownership 中的 `telegram/` 不再包含 event-sink，需要新增 `src/feishu/` 和 `src/event-sink.ts`；“Telegram Clients And Ingress” 一节中 event-sink 的位置要更新；Startup order 改为 “migrate → platform identity prepare → cold replay → … → platform start”；Configured chats 一节注明飞书不归档未配置的会话；记录 `events.dedup_key`。`docs/telegram-module-architecture.md` 如果引用了 event-sink 的路径，也需要同步。
-5. **被动图片描述（建议，后续工作）**：需要在 `createFeishuIngress` 的 build 阶段加一个可选的 `prepareAttachments?: (event: CanonicalMessageEvent) => Promise<void>` 钩子，由 registrar 用 `MEDIA_RUNTIME` 的 `imageResolvers`、`generateThumbnail` 和 `downloadMessageMedia` 实现：下载图片 → `thumbnailWebp` → `imageToText.resolve`。这样 `EventSink.publish` 里已有的 `hydrateAltText` 会把缓存里的描述回填到附件上。`src/media/**` 本身不需要改。
+1. **`currentChannel` in `src/driver/wakeup.ts`** (`'telegram'` hardcoded in two places). Suggest adding a parameter `currentChannel: string` to `executeWakeup` to replace the two `currentChannel: 'telegram'`. When `src/driver/index.ts` calls it, it passes the platform name, which requires adding `platformName: DriverPlatform['name']` to the `createDriver` deps (supplied by `platform.name` in `registrars/driver.ts`). This branch did not change `wakeup.ts`, so the deps do not have this field yet.
+2. **Type patches for the Driver behaviour tests**: in `src/driver/driver-characterization.test.ts` and `src/driver/probe-vs-primary.test.ts`, the `messageId: 1` / `999` returned by the `sendMessage` mock are numbers and need to become `'1'` / `'999'` for the types (the extra `date` field can stay). This only affects `tsc`; running vitest is not affected. The other deps field names are unchanged; `loadMessageAttachments`, `downloadMessageMedia` and `banSpammer` merely became optional.
+3. **Prompts**: `prompts/system.velin.md` says "Telegram group chat", "Telegram-flavored Markdown" and a `t.me` link prefix, and `prompts/late-binding.velin.md` says "Telegram group chat". Suggest branching on `currentChannel`: Feishu output is CommonMark + GFM (tables supported) and does not support Telegram's spoiler; @-mentioning someone needs `<at user_id="ou_...">name</at>` (now wired in, see §1; the model writing `@name` is still only plain text); no message deep links are provided.
+4. **`AGENTS.md`**: in Ownership, `telegram/` no longer contains the event-sink, and `src/feishu/` and `src/event-sink.ts` need to be added; the location of the event-sink in the "Telegram Clients And Ingress" section needs updating; the startup order becomes "migrate → platform identity prepare → cold replay → … → platform start"; the Configured chats section should note that Feishu does not archive unconfigured conversations; record `events.dedup_key`. If `docs/telegram-module-architecture.md` references the event-sink path, it needs to be synced too.
+5. **Passive image description (suggested, future work)**: add an optional hook `prepareAttachments?: (event: CanonicalMessageEvent) => Promise<void>` to the build stage of `createFeishuIngress`, implemented by the registrar with the `imageResolvers`, `generateThumbnail` and `downloadMessageMedia` of `MEDIA_RUNTIME`: download the image → `thumbnailWebp` → `imageToText.resolve`. Then the existing `hydrateAltText` in `EventSink.publish` fills the cached description back onto the attachment. `src/media/**` itself needs no change.

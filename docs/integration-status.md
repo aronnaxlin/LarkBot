@@ -1,8 +1,7 @@
 # Integration status
 
 Current status: 2026-10-17, `main` at `a6a22fd`, PRs #1–#7 merged. The Feishu
-adapter runs in a real private group, and the participation policy from the
-[2026-10-16 night-run analysis](analysis/2026-10-16-night-run-participation.md)
+adapter runs in a real private group, and the initial participation policy
 (PR #7) is in place.
 
 ## Live Feishu runs (2026-10-16 and 2026-10-17)
@@ -44,7 +43,7 @@ disclosed, and the probe reason reaches primary as context, not an instruction.
 ## Known issues (2026-10-17)
 
 - `contact.user.get` returns `41050` "no user authority": the app's contact
-  data range (通讯录权限范围) does not include the group members. Display names
+  data range (通讯录权限范围, "contact data range") does not include the group members. Display names
   fall back to names seen earlier; `open_id` identities are unaffected.
 - Feishu retries undelivered events after about 5 min, 1 h and 6 h. A late
   event carries an old `create_time`, so the model can read it as stale. A

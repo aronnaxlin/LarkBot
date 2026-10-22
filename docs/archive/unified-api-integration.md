@@ -1,16 +1,17 @@
-# Unified API 集成设计（工作文档）
+# Unified API Integration Design (working document)
 
-> 本文档记录将 `src/unified-api/` 集成进整个 Cahciua 仓库的调研发现、
-> 已决策事项、待定事项。每轮讨论后由 Claude 更新，用于跨 compact 续工。
-> `src/unified-api/` 本身**禁止**修改。
+> This document records the investigation findings, settled decisions and open
+> items for integrating `src/unified-api/` into the whole Cahciua repository.
+> Claude updates it after each round of discussion, so work can resume across compactions.
+> `src/unified-api/` itself **must not** be modified.
 
-## 1. 背景与总体边界
+## 1. Background and overall boundaries
 
-### 架构边界
+### Architecture boundary
 
 ```
 ┌──────────────────────────────────────────────────────┐
-│ LLM API Client 层（仅 HTTP，provider-native wire）    │
+│ LLM API client layer (HTTP only, provider-native wire)│
 │   chat.ts                (OpenAI Chat Completions)   │
 │   responses.ts           (OpenAI Responses)          │
 │   messages.ts            (Anthropic Messages)        │
@@ -18,87 +19,87 @@
              │ from*Output                 │ to*Input
              ▼                             ▲
 ┌──────────────────────────────────────────────────────┐
-│ 业务层（仅操作 ConversationEntry[]，IR）              │
+│ Business layer (operates on ConversationEntry[] only, IR)│
 │   runner · context · merge · compaction              │
-│   send-message-human-likeness · probe 分析           │
-│   DB 存取                                             │
+│   send-message-human-likeness · probe analysis       │
+│   DB access                                          │
 └──────────────────────────────────────────────────────┘
 ```
 
-**硬性规则**：
-- 出 API client 立即转 IR；业务代码不许见到任何
-  wire 格式的 LLM 数据（assistant message、function_call、
-  tool_use、reasoning 等）。
-- tool call 循环内，assistant 输出先转 IR，工具结果以
-  `ToolResult` IR entry 形式拼接。
-- 发下一步 API 调用前才 `to*Input` 回 wire。
+**Hard rules**:
+- Convert to IR immediately after leaving the API client; business code must
+  not see any wire-format LLM data (assistant message, function_call,
+  tool_use, reasoning, etc.).
+- Inside the tool call loop, assistant output is converted to IR first, and
+  tool results are appended as `ToolResult` IR entries.
+- Only before issuing the next API call is it converted back to wire with `to*Input`.
 
-### 涉及文件（需要改/新增）
+### Files involved (to change/add)
 
-| 文件 | 动作 |
+| File | Action |
 |---|---|
-| `src/db/schema.ts` | 新增 `turn_responses_v2` / `probe_responses_v2` 表 |
-| `drizzle/XXXX_create_v2_tables.sql` | 建表 SQL |
-| `src/db/persistence.ts` | 改 persist/load 签名返回 IR，加启动迁移函数 |
-| `src/db/migrate-v2.ts`（新）| v1→v2 回填逻辑 |
-| `src/rendering/types.ts` | `RenderedContentPiece` image 改用 Sharp |
-| `src/rendering/*` | 下游生成方改用 Sharp |
-| `src/telegram/*` | 图片下载产出 Sharp 而非 base64 data URL |
-| `src/driver/types.ts` | 删除 `TRDataEntry`/`ResponsesTRDataItem`/`ExtendedMessage` 等，重建类型 |
-| `src/driver/context.ts` | `composeContext` 返回 `ConversationEntry[]` |
-| `src/driver/merge.ts` | 操作 IR |
-| `src/driver/convert.ts` | **整个删除**（功能归 unified-api） |
-| `src/driver/runner.ts` | 转 IR、统一循环 |
-| `src/driver/compaction.ts` | 改 IR |
-| `src/driver/send-message-human-likeness.ts` | 重写，扫 IR |
-| `src/driver/messages.ts` | Anthropic 原生 HTTP |
-| `src/driver/index.ts` | 入口与分发 |
-| 各 `*.test.ts` | 测试迁移 |
+| `src/db/schema.ts` | Add the `turn_responses_v2` / `probe_responses_v2` tables |
+| `drizzle/XXXX_create_v2_tables.sql` | Table-creation SQL |
+| `src/db/persistence.ts` | Change persist/load signatures to return IR, add the startup migration function |
+| `src/db/migrate-v2.ts` (new) | v1→v2 backfill logic |
+| `src/rendering/types.ts` | `RenderedContentPiece` image switches to Sharp |
+| `src/rendering/*` | Downstream producers switch to Sharp |
+| `src/telegram/*` | Image download yields Sharp instead of a base64 data URL |
+| `src/driver/types.ts` | Delete `TRDataEntry`/`ResponsesTRDataItem`/`ExtendedMessage` etc., rebuild the types |
+| `src/driver/context.ts` | `composeContext` returns `ConversationEntry[]` |
+| `src/driver/merge.ts` | Operates on IR |
+| `src/driver/convert.ts` | **Deleted entirely** (functionality belongs to unified-api) |
+| `src/driver/runner.ts` | Convert to IR, unified loop |
+| `src/driver/compaction.ts` | Switch to IR |
+| `src/driver/send-message-human-likeness.ts` | Rewrite, scanning IR |
+| `src/driver/messages.ts` | Native Anthropic HTTP |
+| `src/driver/index.ts` | Entry point and dispatch |
+| Each `*.test.ts` | Test migration |
 
-## 2. 已决策事项
+## 2. Settled decisions
 
-### D1. 图片：全流程 Sharp
-- RC 层 `RenderedContentPiece` 的 image 变体从 `{url:string}`
-  改成 `{image: Sharp}`。
-- telegram 下载产出 Buffer 立即 `sharp(buf)` 包起来。
-- 只在**序列化边界**（存 DB、发 LLM API）通过 codec/Sharp
-  管道转成 base64 或送入请求体。
-- codec 注册 Sharp：
-  - serialize（async）：`await sharp.toBuffer()` + `metadata()` 取 format → `{base64, format}`。
-  - deserialize（async）：`sharp(Buffer.from(base64, 'base64'))`（codec handler 是 async 的，OK）。
+### D1. Images: Sharp throughout
+- The image variant of `RenderedContentPiece` at the RC layer changes from `{url:string}`
+  to `{image: Sharp}`.
+- The Buffer produced by the telegram download is wrapped immediately with `sharp(buf)`.
+- Only at the **serialization boundary** (storing to DB, sending to the LLM API) is it
+  converted to base64 or put into the request body through the codec/Sharp pipeline.
+- The codec registers Sharp:
+  - serialize (async): `await sharp.toBuffer()` + `metadata()` to get the format → `{base64, format}`.
+  - deserialize (async): `sharp(Buffer.from(base64, 'base64'))` (codec handlers are async, so this is OK).
 
-### D2. reasoning 门禁：用 model name 代替 compat 字符串
-- v2 表有列 `model_name TEXT NOT NULL DEFAULT ''`。
-- 写入 TR 时记这次调用实际用的模型名
-  （例 `'gpt-5'`、`'claude-sonnet-4-5-20250929'`）。
-- 读出时与**当前 chat 配的 primary model name**字符串比较。
-  不等 → 对该 TR 的 `entries` 跑 `stripReasoning`。
-- 删除 config 里原来的 `reasoningSignatureCompat` 字段。
+### D2. Reasoning gate: use the model name instead of a compat string
+- The v2 tables have a column `model_name TEXT NOT NULL DEFAULT ''`.
+- When a TR is written, record the model name actually used for that call
+  (for example `'gpt-5'`, `'claude-sonnet-4-5-20250929'`).
+- On read, compare it as a string with the **primary model name configured for the current chat**.
+  If not equal → run `stripReasoning` on that TR's `entries`.
+- Delete the old `reasoningSignatureCompat` field from the config.
 
-### D3. 趁 IR 化简化 trim
-- `trimImages` / `trimToolResults`（image detail 降级）
-  在 `InputPart[]` 层面统一写一次，
-  不再在 chat/responses 两条 wire 路径各写一份。
-- `trimContext` 的 assistant↔tool 对齐用 `callId` 关联，
-  不再靠消息数组位置。
-- `sanitizeToolCallIdsForMessagesApi`（Anthropic id 正则）
-  归 `toMessagesInput` 处理（如果 unified-api 没做，停下来商量）。
+### D3. Simplify trim while moving to IR
+- `trimImages` / `trimToolResults` (image detail downgrade)
+  are written once at the `InputPart[]` level,
+  no longer once each on the chat and responses wire paths.
+- The assistant↔tool alignment in `trimContext` is correlated by `callId`,
+  no longer by position in the message array.
+- `sanitizeToolCallIdsForMessagesApi` (the Anthropic id regex)
+  is handled by `toMessagesInput` (if unified-api does not do it, stop and discuss).
 
-### D4. 含图 tool result 抬 user message
-- 归 `toChatCompletionsInput` 处理，业务层不管。
-- 实现时若发现 unified-api 没做，停下来商量
-  （当前决策：不动 unified-api）。
+### D4. Tool results containing images are lifted into a user message
+- Handled by `toChatCompletionsInput`; the business layer does not care.
+- If implementation finds that unified-api does not do it, stop and discuss
+  (current decision: do not touch unified-api).
 
-### D5. probe_responses 也 v2
-- 原因：schema 统一、便于查询/分析，
-  启动迁移逻辑复用 TR v2 的。
-- probe 只写不读，除了 `turn_responses` 被
-  `send-message-human-likeness.ts` 扫用于 late-binding prompt
-  外，`probe_responses` 没有读取方。
+### D5. probe_responses also becomes v2
+- Reason: unified schema, easier querying/analysis,
+  and the startup migration logic reuses that of TR v2.
+- Probe is write-only; besides `turn_responses`, which is scanned by
+  `send-message-human-likeness.ts` for the late-binding prompt,
+  nothing reads `probe_responses`.
 
-### D6. 启动时一次性回填（不是 SQL migration 做）
-- 建表由 drizzle SQL 负责（只有 CREATE TABLE + 索引）。
-- 数据搬运由 TS 启动钩子做：
+### D6. One-time backfill at startup (not done by an SQL migration)
+- Table creation is the job of drizzle SQL (only CREATE TABLE + indexes).
+- Data movement is done by a TS startup hook:
   ```
   if (SELECT COUNT(*) FROM turn_responses_v2 == 0
       AND SELECT COUNT(*) FROM turn_responses > 0) {
@@ -108,11 +109,11 @@
     COMMIT;
   }
   ```
-- **单事务**包住全部回填（SQLite 单库事务，行数可控）。
-- probe v2 同逻辑。
-- v1 表**保留不 drop**，留档备查/回滚。
+- A **single transaction** wraps the whole backfill (a single-database SQLite transaction, with a manageable row count).
+- probe v2 uses the same logic.
+- The v1 tables are **kept and not dropped**, for the record / rollback.
 
-### D7. v2 表 shape
+### D7. v2 table shape
 
 ```sql
 CREATE TABLE turn_responses_v2 (
@@ -142,144 +143,144 @@ CREATE INDEX probe_responses_v2_chat_idx
   ON probe_responses_v2 (chat_id);
 ```
 
-**列变化**（相对 v1）：
-- 去 `provider`（IR provider-agnostic）
-- 去 `session_meta`（v1 从未写入非 null）
-- 去 `data` → 改 `entries`（codec 包装的 JSON）
+**Column changes** (relative to v1):
+- Drop `provider` (the IR is provider-agnostic)
+- Drop `session_meta` (v1 never wrote a non-null value)
+- Drop `data` → replaced by `entries` (codec-wrapped JSON)
 - `reasoning_signature_compat` → `model_name`
-- 从 v1 回填的行 `model_name = ''`（空串视作 mismatch，
-  读时一律 strip reasoning）。
-- probe v2 也保留 `model_name`（方便查询）。
+- Rows backfilled from v1 get `model_name = ''` (an empty string is treated as a mismatch,
+  so reasoning is always stripped on read).
+- probe v2 also keeps `model_name` (convenient for querying).
 
-### D8. 业务层强制 IR
-- 边界如「架构边界」图所示。
-- `send-message-human-likeness.ts` 重写：扫 `ConversationEntry[]`，
-  找 `OutputMessage.parts` 里 `kind:'toolCall' && name:'send_message'`，
-  配对后续 `ToolResult(callId)` 的 `payload` 看 `ok:true`，
-  提取 `args` JSON 里的 `text`。
+### D8. Business layer must use IR
+- The boundary is as in the "Architecture boundary" diagram.
+- `send-message-human-likeness.ts` is rewritten: scan `ConversationEntry[]`,
+  find `kind:'toolCall' && name:'send_message'` in `OutputMessage.parts`,
+  pair it with the following `ToolResult(callId)` and look at its `payload` for `ok:true`,
+  and extract `text` from the `args` JSON.
 
-### D9. Anthropic 原生路径本次一起做
-- 新增 `src/driver/messages.ts`。
-- config 增加 `apiFormat: 'anthropic-messages'`。
-- HTTP 客户端不关心 provider 差异，header/URL 按 provider
-  透传到 fetch，不做封装抽象。
-- **重要**：`ProviderFormat` 不进 DB，只在 config 和 runner 分发处。
+### D9. The native Anthropic path is done in this pass too
+- Add `src/driver/messages.ts`.
+- Add `apiFormat: 'anthropic-messages'` to the config.
+- The HTTP client does not care about provider differences; headers/URL are passed
+  through to fetch per provider, with no wrapper abstraction.
+- **Important**: `ProviderFormat` does not go into the DB; it exists only in the config and at the runner dispatch.
 
 ### D10. Sharp async handler
-codec handler 允许 async，`sharp(Buffer.from(base64))` 用 `async v => sharp(...)` 形式。sharp 构造同步 + lazy decode，`await` 无实际开销。
+Codec handlers may be async, and `sharp(Buffer.from(base64))` is written as `async v => sharp(...)`. The sharp constructor is synchronous with lazy decoding, so `await` has no real cost.
 
-### D11. 删除 reasoningSignatureCompat
-从 config schema、`LlmEndpoint` 类型、`config.yaml` 等处全部删除此字段。读取时改为比较 model_name。
+### D11. Delete reasoningSignatureCompat
+Remove this field everywhere: the config schema, the `LlmEndpoint` type, `config.yaml`, etc. On read, compare model_name instead.
 
-### D12. tool 产出的图片也用 Sharp
-`src/driver/tools.ts` 里 `read_image` / `download_file` 等产出 `ToolResult.payload` 时,图片直接用 Sharp 实例,不再 data URL。这样 IR 里所有图片都是 Sharp。
+### D12. Images produced by tools also use Sharp
+When `read_image` / `download_file` etc. in `src/driver/tools.ts` produce a `ToolResult.payload`, images use Sharp instances directly and no longer data URLs. That way all images in the IR are Sharp.
 
-### D13. RC 产出方改 Sharp
-`src/rendering/index.ts:164` 的 thumbnailWebp 拼 data URL 改成 `sharp(Buffer.from(att.thumbnailWebp, 'base64'))`。DB 里 thumbnailWebp 字段不动。测试同步更新。
+### D13. The RC producer switches to Sharp
+The data URL assembled from thumbnailWebp at `src/rendering/index.ts:164` becomes `sharp(Buffer.from(att.thumbnailWebp, 'base64'))`. The thumbnailWebp field in the DB is untouched. Tests are updated accordingly.
 
-### D14. 启动时一次性迁移(时机 A)
-drizzle migrator 跑完后、driver/pipeline 启动之前,在 `src/index.ts` 启动流程中执行 v1→v2 回填。
+### D14. One-time migration at startup (timing A)
+After the drizzle migrator finishes and before the driver/pipeline starts, run the v1→v2 backfill in the startup flow of `src/index.ts`.
 
-### D15. 回填错误处理
-若任一行迁移抛异常,整个事务 rollback 并崩溃整个程序,要求人工介入。不吞错、不跳行。
+### D15. Backfill error handling
+If any row's migration throws, roll back the whole transaction and crash the whole program, requiring manual intervention. No swallowing errors, no skipping rows.
 
-### D16. 测试策略 B
-先了解原 `convert.test.ts` / `merge.test.ts` / `context.test.ts` 覆盖的行为要点,然后朝这些行为目标在 IR 上重写测试。老测试删除。
+### D16. Test strategy B
+First understand the behaviours covered by the original `convert.test.ts` / `merge.test.ts` / `context.test.ts`, then rewrite the tests on IR aimed at those behaviours. Delete the old tests.
 
-## 4. 需要验证但当前未验证的假设
+## 4. Assumptions that need verification but are currently unverified
 
-- [ ] `toChatCompletionsInput` 处理含图 `ToolResult`
-      （抬到下一条 user message）—— 实现时查证。
-- [ ] `toMessagesInput` 做 Anthropic tool id 正则 sanitize ——
-      实现时查证。
-- [ ] `toMessagesInput` parse `ToolCallPart.args` 并 fallback `{}` ——
-      已在 `unified-api/types.ts` IR 注释中确认存在。
-- [ ] codec handler 支持 async：`codec.ts:14-18` 的 `CustomType`
-      serialize/deserialize 都返回 Promise，已确认。
+- [ ] `toChatCompletionsInput` handles a `ToolResult` that contains images
+      (lifted into the next user message): verify during implementation.
+- [ ] `toMessagesInput` does the Anthropic tool id regex sanitize:
+      verify during implementation.
+- [ ] `toMessagesInput` parses `ToolCallPart.args` and falls back to `{}`:
+      already confirmed to exist in the IR comments of `unified-api/types.ts`.
+- [ ] Codec handlers support async: the `CustomType` serialize/deserialize at `codec.ts:14-18`
+      both return Promises, confirmed.
 
-## 5. 实现顺序建议
+## 5. Suggested implementation order
 
-1. drizzle SQL：建 v2 两张表。
-2. schema.ts 加 v2 定义。
-3. rendering 层改 Sharp（RC `image` 变体）。
-4. telegram 下载侧配合改 Sharp 产出。
-5. codec Sharp 注册在 `src/db/codec.ts`（新）。
-6. `src/db/migrate-v2.ts` 回填逻辑。
-7. `persistence.ts` 增 v2 读写函数，启动钩子调迁移。
-8. runner + API client 接 IR：在 runner 内 from*Output。
-9. context.ts / merge.ts 改操作 IR。
-10. send-message-human-likeness.ts 重写。
-11. compaction.ts 改 IR。
-12. driver/index.ts 粘合。
-13. messages.ts（Anthropic）+ runner 分发。
-14. 删除旧 `convert.ts`、旧 `types.ts` 中的废弃类型。
-15. 测试迁移。
+1. drizzle SQL: create the two v2 tables.
+2. Add the v2 definitions to schema.ts.
+3. Switch the rendering layer to Sharp (RC `image` variant).
+4. Adapt the telegram download side to produce Sharp.
+5. Register the codec Sharp in `src/db/codec.ts` (new).
+6. `src/db/migrate-v2.ts` backfill logic.
+7. Add v2 read/write functions to `persistence.ts`, and have the startup hook call the migration.
+8. Connect the runner + API client to IR: from*Output inside the runner.
+9. Switch context.ts / merge.ts to operate on IR.
+10. Rewrite send-message-human-likeness.ts.
+11. Switch compaction.ts to IR.
+12. Glue it in driver/index.ts.
+13. messages.ts (Anthropic) + runner dispatch.
+14. Delete the old `convert.ts` and the obsolete types in the old `types.ts`.
+15. Test migration.
 
-## 6. 关键参考位置
+## 6. Key reference locations
 
-| 关注点 | 文件 | 行 |
+| Concern | File | Lines |
 |---|---|---|
-| 现 TR schema | `src/db/schema.ts` | 95-107 |
+| Current TR schema | `src/db/schema.ts` | 95-107 |
 | persist/load TR | `src/db/persistence.ts` | 306-354 |
-| runner chat 循环 | `src/driver/runner.ts` | 69-124 |
-| runner responses 循环 | `src/driver/runner.ts` | 126-186 |
+| runner chat loop | `src/driver/runner.ts` | 69-124 |
+| runner responses loop | `src/driver/runner.ts` | 126-186 |
 | composeContext | `src/driver/context.ts` | 529-581 |
 | mergeContext | `src/driver/merge.ts` | 20-75 |
-| reasoning 门禁 | `src/driver/context.ts` | 119-156 |
-| 含图 tool result 抬 user | `src/driver/convert.ts` | 51-114 |
+| reasoning gate | `src/driver/context.ts` | 119-156 |
+| Lifting tool results with images into user | `src/driver/convert.ts` | 51-114 |
 | Anthropic tool id sanitize | `src/driver/context.ts` | 369-420 |
 | trim suite | `src/driver/context.ts` | 58-101, 243-367 |
 | IR invariants | `src/unified-api/types.ts` | 1-25 |
-| 迁移 helper | `src/unified-api/migrations.ts` | 全 |
-| codec（async handler）| `src/unified-api/codec.ts` | 14-18 |
-| RC 类型 | `src/rendering/types.ts` | 9-40 |
+| Migration helpers | `src/unified-api/migrations.ts` | whole file |
+| codec (async handler) | `src/unified-api/codec.ts` | 14-18 |
+| RC types | `src/rendering/types.ts` | 9-40 |
 | probe writer | `src/driver/index.ts` | 350-355 |
-| send-message 评估入口 | `src/driver/index.ts` | 295 |
+| send-message evaluation entry | `src/driver/index.ts` | 295 |
 
-## 7. 讨论历史摘要
+## 7. Discussion history summary
 
-**轮 1**（整体调研）：识别 9 个摩擦点与开放问题。
+**Round 1** (overall investigation): identified 9 friction points and open questions.
 
-**轮 2**（用户决策）：
-- 图片全 Sharp。
-- reasoning 用 model_name 替代 compat。
-- trim 在 IR 上简化。
-- 含图 tool result 归 unified-api。
-- probe 也 v2。
-- 一次性回填。
-- v2 shape 确认，compat → model_name。
-- 业务层禁见 wire。
-- Anthropic 本次做，HTTP 透传 header。
+**Round 2** (user decisions):
+- Images all Sharp.
+- Reasoning uses model_name instead of compat.
+- Trim simplified on IR.
+- Tool results with images belong to unified-api.
+- probe also v2.
+- One-time backfill.
+- v2 shape confirmed, compat → model_name.
+- The business layer must not see wire.
+- Anthropic done in this pass, HTTP passes headers through.
 
-**轮 3**（用户进一步决策）：
-- codec Sharp 用 async handler。
-- v1 不 drop,留档。
-- 回填单事务。
-- v2 回填行 model_name 留空。
-- probe v2 也存 model_name。
-- HTTP client 透传 header,不抽象。
+**Round 3** (further user decisions):
+- The codec Sharp uses an async handler.
+- v1 is not dropped, kept for the record.
+- Backfill in a single transaction.
+- v2 backfilled rows leave model_name empty.
+- probe v2 also stores model_name.
+- The HTTP client passes headers through, no abstraction.
 
-**轮 4**（用户进一步决策）：
-- 删除 config 里 reasoningSignatureCompat 字段。
-- tool 产出的图片也用 Sharp。
-- RC 产出方改 Sharp。
-- 启动迁移时机选 A(drizzle 之后、driver 之前)。
-- 回填错误 rollback + 崩溃。
-- 测试先理解覆盖面,再 IR 上重写。
+**Round 4** (further user decisions):
+- Delete the reasoningSignatureCompat field from the config.
+- Images produced by tools also use Sharp.
+- The RC producer switches to Sharp.
+- Startup migration timing is A (after drizzle, before the driver).
+- Backfill errors: rollback + crash.
+- Tests: first understand the coverage, then rewrite on IR.
 
-**轮 5**（用户进一步决策）：
-- 不双写,只写 v2。
-- drizzle migration 一个文件,两张表一起建。
-- codec 实例放 `src/db/codec.ts`,通过 `createCodec` 建并注册 Sharp。
-- 全量清理 compat:primaryModel / probeModel / compactionModel / sanitize*ForTR 全删。
-- `loadTurnResponses` 新签名返回 `TurnResponseV2[]`(含 `entries`/`modelName`)。`composeContext` 收 `TurnResponseV2[]` + 当前 modelName,mismatch 时 `stripReasoning`。
-- merge 逻辑不变,操作对象换成 IR。
-- RC → IR:多段连续 RC 合并成一条 InputMessage(role:'user')。
-- 启动迁移必须在所有其他模块初始化之前、drizzle migrate 之后。迁移失败不允许任何其他副作用。
+**Round 5** (further user decisions):
+- No dual writes, write only v2.
+- One drizzle migration file, creating both tables together.
+- The codec instance goes in `src/db/codec.ts`, built through `createCodec` and registering Sharp.
+- Clean up compat entirely: primaryModel / probeModel / compactionModel / sanitize*ForTR all deleted.
+- The new signature of `loadTurnResponses` returns `TurnResponseV2[]` (with `entries`/`modelName`). `composeContext` takes `TurnResponseV2[]` + the current modelName, and runs `stripReasoning` on a mismatch.
+- The merge logic is unchanged, with the operand switched to IR.
+- RC → IR: consecutive RC segments are merged into one InputMessage (role:'user').
+- The startup migration must run before all other modules are initialized and after drizzle migrate. A failed migration must not allow any other side effect.
 
-**轮 6**（破例决策）：
-- **允许修改 unified-api**。原因:
-  (1) `toChatCompletionsInput` 当前把"含图 tool result 抬到 user 消息"甩给了外部(`driver/convert`),但 driver/convert 要删;
-  (2) `toMessagesInput` 不做 Anthropic tool_use id 正则 sanitize。
-- 两个能力**必须放进 unified-api**,业务层不见 wire 原则不打折扣。
-- 修改范围最小化:只改 `to-chat-input.ts` 和 `to-messages-input.ts`。
+**Round 6** (exceptional decision):
+- **Modifying unified-api is allowed**. Reasons:
+  (1) `toChatCompletionsInput` currently leaves "lifting tool results containing images into a user message" to the outside (`driver/convert`), but driver/convert is to be deleted;
+  (2) `toMessagesInput` does not do the Anthropic tool_use id regex sanitize.
+- These two capabilities **must go into unified-api**, without discounting the principle that the business layer does not see wire.
+- Keep the scope of the change minimal: only change `to-chat-input.ts` and `to-messages-input.ts`.

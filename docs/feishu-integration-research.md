@@ -1,198 +1,198 @@
-# 飞书接入调研（Feishu/Lark Integration Research）
+# Feishu/Lark Integration Research
 
-日期：2026-10-16 · 状态：**仅调研，未实现** · 范围：飞书/Lark 接入的最小增量方案
+Date: 2026-10-16 · Status: **research only, not implemented** · Scope: the smallest incremental plan for Feishu/Lark integration
 
-本文只回答“怎么在现有 Cahciua 代码上接飞书”，不实现代码、不安装依赖、不改配置、不启动机器人。
+This document answers only "how to connect Feishu on top of the existing Cahciua code". It implements no code, installs no dependencies, changes no configuration and starts no bot.
 
-标注约定：
+Labelling conventions:
 
-- **【事实】**：有代码或官方文档/官方 SDK 源码证据，附链接。
-- **【建议】**：本文的判断与推荐，可以改。
-- **【待验证】**：无法从公开资料确认，必须在真实租户/应用里实测。
-- 本文不对上游 `Menci/Cahciua` 的既有行为做价值判断；指向仓库的链接均为本次调研时抓取的提交，代码只读不复制。
-
----
-
-## 0. 结论摘要
-
-1. **【建议】接入载体：官方 Node SDK [`@larksuiteoapi/node-sdk`](https://github.com/larksuite/node-sdk)（MIT，本次核对版本 1.76.0，commit `b188be60134d409b61259546bcf69c731d2b0b7c`）**。用 `WSClient` + `EventDispatcher` 收长连接事件，用包内导出的 `normalize()` 把原始事件规范化成文本/markdown + 附件描述，用自己的代码产生 `CanonicalIMEvent`；出站用 `client.im.v1.message.create/reply`。不采用 SDK 的高层 `Channel` 模块，因为它自带一整套 dedup/policy/限流/批处理/队列语义，会和 Driver 的 debounce、probe 门控和 ingress 队列形成第二个调度器；`normalize()` 单独导出，正好只借它的解析能力。
-
-2. **【事实】全链路真正需要动的地方是“消息 ID 一律是字符串”这条缝**：Driver 依赖签名、`react`/`send_message`/reply 校验、附件 `file-id` 解析、`messages` 表主键都默认 `messageId: number`。飞书 `message_id` 形如 `om_xxx`、`chat_id` 形如 `oc_xxx`、用户 `open_id` 形如 `ou_xxx`，无法转数字。把这条缝收敛到一处平台接口，是并行开发的前提（见 §5）。
-
-3. **【事实】飞书事件不会被完整补发**：长连接只在在线时推送，官方说明“特殊情况下可能会收到重复的推送，如有幂等需求请使用 `message_id` 去重，不要依赖 `event_id`”，且长连接有“3 秒内处理完成否则超时重推”“集群模式、多客户端只有一个随机收到”的限制。因此去重键必须是 `message_id` 且要能跨重启；必须有断线补洞，且**不能承诺看到全部历史**（见 §2.5/§2.7）。
-
-4. **【事实】机器人自己的消息不会作为事件推回来**（`im:message.group_msg` 明确“不包含机器人消息”）。现有“synthetic self-event”机制在飞书不是优化而是**必需**：每次成功发送后必须自己注入 `isSelfSent=true` 的 canonical 事件，否则 bot 看不到自己说过什么。
-
-5. **【事实】飞书没有“消息编辑”事件**。官方 Node SDK 事件表里 IM 域只有 13 个事件，无 edit/update；编辑只能靠拉取消息时的 `updated`/`update_time` 字段发现。撤回有独立事件 `im.message.recalled_v1`。因此第一版应支持撤回（delete），不支持编辑（edit），并明确记录该限制（见 §2.6）。
-
-6. **【建议】第一版范围**：群聊 + p2p 文本消息、@、引用、稳定身份、发送、表情、撤回、成员/改名服务事件、去重、断线补洞。媒体、卡片/流式、编辑、ban_spammer、typing 指示、通用插件框架都不做。第一版**可以不改数据库 schema**：飞书事件只写 `events`（canonical），不写 Telegram 专用的 `messages` 表，从而绕开 `messages.message_id integer → text` 迁移（见 §4.4）。
-
-7. **【建议】权限最小集**：`im:message` + `im:message.group_msg`（敏感、可能需管理员审批）+ `im:message:send_as_bot` + `im:resource` + `im:chat`/`im:chat.members:read` + `contact:user.base:readonly`（昵称解析），事件订阅 `im.message.receive_v1`、`im.message.recalled_v1`、成员/群变更事件；并在开发者后台开启长连接、发布版本。完整清单见 §6.3。
-
-8. **【建议】CLI/MCP 不是第一版的接入方式**。官方 `larksuite/cli`（MIT，commit `017b19a793ad71794a02887ede04757f3d82e10d`）与 `lark-openapi-mcp` 适合后续作为“查历史/查成员/查资料”的**工具**，不适合与自建 WS 客户端同时跑：同一个 app 的长连接是集群模式，多客户端只有一个能收到事件，两个 ingress 同时在线会随机丢事件。官方 README 也明确提示不要把 CLI 接入的机器人拉进群聊。详见 §3.6。
+- **[Fact]**: backed by code or official documentation / official SDK source, with a link.
+- **[Suggestion]**: this document's judgement and recommendation, open to change.
+- **[To verify]**: cannot be confirmed from public material and must be tested in a real tenant/app.
+- This document makes no value judgement on existing behaviour of the upstream `Menci/Cahciua`; links pointing to repositories are the commits fetched during this research, and the code is read-only and not copied.
 
 ---
 
-## 1. 现有链路追踪（代码证据）
+## 0. Summary of conclusions
 
-数据流：**平台事件 → canonical event → DB → Projection(IC) → Rendering(RC) → Driver(probe/primary) → 平台发送 → synthetic self-event**。
+1. **[Suggestion] Integration vehicle: the official Node SDK [`@larksuiteoapi/node-sdk`](https://github.com/larksuite/node-sdk) (MIT, version 1.76.0 checked, commit `b188be60134d409b61259546bcf69c731d2b0b7c`)**. Use `WSClient` + `EventDispatcher` to receive long-connection events, use the `normalize()` exported by the package to normalize raw events into text/markdown + attachment descriptions, produce `CanonicalIMEvent` with our own code, and use `client.im.v1.message.create/reply` for outbound. Do not use the SDK's high-level `Channel` module, because it brings a whole set of dedup/policy/rate-limit/batching/queue semantics that would form a second scheduler alongside the Driver's debounce, probe gating and the ingress queue; `normalize()` is exported on its own, so we borrow only its parsing ability.
 
-### 1.1 逐段职责
+2. **[Fact] The place that really has to change across the whole path is the seam "message IDs are always strings"**: the Driver's dependency signatures, the `react`/`send_message`/reply validation, the attachment `file-id` parsing and the primary key of the `messages` table all assume `messageId: number`. Feishu's `message_id` looks like `om_xxx`, `chat_id` like `oc_xxx` and a user's `open_id` like `ou_xxx`, none convertible to numbers. Converging this seam into one platform interface is the prerequisite for parallel development (see §5).
 
-| 阶段 | 关键文件 | 当前实现要点 |
+3. **[Fact] Feishu events are not replayed in full**: the long connection pushes only while online; the official note says "in special cases duplicate pushes may be received; if you need idempotency please deduplicate by `message_id` and do not rely on `event_id`" (特殊情况下可能会收到重复的推送，如有幂等需求请使用 `message_id` 去重，不要依赖 `event_id`), and the long connection has the limits "processing must complete within 3 seconds or the push times out and is retried" and "cluster mode: with multiple clients only one randomly receives it". So the dedup key must be `message_id` and must survive restarts; there must be gap filling after disconnects, and **it cannot be promised that all history will be visible** (see §2.5/§2.7).
+
+4. **[Fact] The bot's own messages are not pushed back as events** (`im:message.group_msg` explicitly says "does not include bot messages"). The existing "synthetic self-event" mechanism is not an optimization on Feishu but **required**: after every successful send the bot must inject an `isSelfSent=true` canonical event itself, otherwise the bot cannot see what it said.
+
+5. **[Fact] Feishu has no "message edit" event**. In the official Node SDK event table the IM domain has only 13 events, with no edit/update; edits can only be discovered through the `updated`/`update_time` fields when fetching messages. Recalls have their own event `im.message.recalled_v1`. So the first version should support recalls (delete) and not edits (edit), and record this limitation explicitly (see §2.6).
+
+6. **[Suggestion] Scope of the first version**: group chats + p2p text messages, @-mentions, quotes, stable identity, sending, reactions, recalls, member/rename service events, deduplication, gap filling after disconnects. Media, cards/streaming, edits, ban_spammer, typing indicators and a generic plugin framework are all out. The first version **can leave the database schema unchanged**: Feishu events are written only to `events` (canonical), not to the Telegram-specific `messages` table, thereby avoiding the `messages.message_id integer → text` migration (see §4.4).
+
+7. **[Suggestion] Minimum permission set**: `im:message` + `im:message.group_msg` (sensitive, may need administrator approval) + `im:message:send_as_bot` + `im:resource` + `im:chat`/`im:chat.members:read` + `contact:user.base:readonly` (display-name resolution), with event subscriptions `im.message.receive_v1`, `im.message.recalled_v1` and member/chat change events; and enable the long connection in the developer console and publish a version. The full list is in §6.3.
+
+8. **[Suggestion] CLI/MCP is not the integration method for the first version**. The official `larksuite/cli` (MIT, commit `017b19a793ad71794a02887ede04757f3d82e10d`) and `lark-openapi-mcp` suit later use as **tools** for "look up history / look up members / look up documents", and are not suited to run at the same time as a self-built WS client: the long connection of one app is in cluster mode, only one of several clients can receive events, and two ingresses online at once will randomly lose events. The official README also explicitly warns against adding a CLI-connected bot to group chats. See §3.6.
+
+---
+
+## 1. Tracing the existing path (code evidence)
+
+Data flow: **platform event → canonical event → DB → Projection (IC) → Rendering (RC) → Driver (probe/primary) → platform send → synthetic self-event**.
+
+### 1.1 Responsibilities stage by stage
+
+| Stage | Key files | Current implementation notes |
 | --- | --- | --- |
-| 平台客户端 | `src/telegram/bot.ts`、`src/telegram/userbot.ts`、`src/telegram/tdjson.ts` | 两个 TDLib 客户端；启动前 `tdl.configure()`；发送要等 `updateMessageSendSucceeded` 才拿到最终 id |
-| 入口聚合 | `src/telegram/manager.ts` | 事件总线、`ingressQueue`（per-chat 有序、失败无限重试、只提交连续前缀）；阻塞式元数据/媒体 hydrate |
-| 平台→canonical | `src/telegram/adaptation.ts` | `parseContent` 把 text+entities 解析成 `ContentNode[]`；消息/编辑/删除/服务事件 |
-| 落库 | `src/db/persistence.ts` | `persistMessage`（`messages` 表，upsert）、`persistEvent`（`events` 表，append-only） |
-| 发布 | `src/telegram/event-sink.ts` | configured chat 白名单 → hydrate alt text → `pipeline.pushEvent` → `DriverInputBus.handleEvent`；用 WeakSet/WeakMap 保证 persist/publish/notify 幂等 |
-| 活处理 | `src/telegram/live-handlers.ts` | 平台事件 → canonical → 落库 → 发布；编辑的“幽灵编辑”检测 |
-| Projection | `src/projection/reduce.ts`、`src/projection/types.ts` | 纯 reducer；edit/delete 原地改节点；user rename 产生系统事件；`ICUserState` 记录首/末见与消息数 |
-| Rendering | `src/rendering/index.ts` | IC → XML 段；`mentionsMe`/`repliesToMe` 用于唤醒；`<attachment file-id="messageId:index">` |
-| Pipeline | `src/pipeline.ts` | per-chat IC/RC residency、compact cursor、`getRenderParams`（`botUserId`、`blockedUserIds`） |
-| Driver | `src/driver/index.ts` | 组装 deps；per-chat scheduler/compaction/runner；`handleEvent`/`handleTyping` |
-| Probe/Primary | `src/driver/wakeup.ts`、`src/driver/runner.ts` | probe 门控；`forceToolChoice: 'any'`；`maxSteps: Infinity`；无 send 时的 forced-send fallback |
-| 工具 | `src/driver/primary-tools.ts`、`src/driver/tools/*` | `send_message`/`react`/`read_image`/`download_file`/`read_old_messages`/`bash`… |
-| 出站 + 自事件 | `src/telegram/driver-hooks.ts` | Markdown→Telegram HTML；发送；`injectSyntheticEvent` 写 `isSelfSent` canonical 事件（不唤醒 Driver） |
-| 启动 | `src/startup/index.ts`、`src/container/**` | 模块顶层 `tdl.configure({ tdjson })`；容器 → 冷回放 → attach Driver → live handlers → telegram.start → activate → postStartup |
-| 配置 | `src/config/config.ts` | `telegram` 为必填；`chats.<chatId>` 白名单；`models`/`runtime`/`tools` 平台无关 |
+| Platform clients | `src/telegram/bot.ts`, `src/telegram/userbot.ts`, `src/telegram/tdjson.ts` | Two TDLib clients; `tdl.configure()` before startup; a send has to wait for `updateMessageSendSucceeded` to get the final id |
+| Ingress aggregation | `src/telegram/manager.ts` | Event bus, `ingressQueue` (ordered per chat, unbounded retry on failure, commits only a contiguous prefix); blocking metadata/media hydration |
+| Platform→canonical | `src/telegram/adaptation.ts` | `parseContent` parses text+entities into `ContentNode[]`; messages/edits/deletes/service events |
+| Persistence | `src/db/persistence.ts` | `persistMessage` (the `messages` table, upsert), `persistEvent` (the `events` table, append-only) |
+| Publication | `src/telegram/event-sink.ts` | Configured chat whitelist → hydrate alt text → `pipeline.pushEvent` → `DriverInputBus.handleEvent`; WeakSet/WeakMap make persist/publish/notify idempotent |
+| Live handling | `src/telegram/live-handlers.ts` | Platform event → canonical → persist → publish; "ghost edit" detection for edits |
+| Projection | `src/projection/reduce.ts`, `src/projection/types.ts` | Pure reducer; edit/delete modify nodes in place; user rename produces a system event; `ICUserState` records first/last seen and message count |
+| Rendering | `src/rendering/index.ts` | IC → XML segments; `mentionsMe`/`repliesToMe` are used for waking; `<attachment file-id="messageId:index">` |
+| Pipeline | `src/pipeline.ts` | Per-chat IC/RC residency, compact cursor, `getRenderParams` (`botUserId`, `blockedUserIds`) |
+| Driver | `src/driver/index.ts` | Assembles deps; per-chat scheduler/compaction/runner; `handleEvent`/`handleTyping` |
+| Probe/Primary | `src/driver/wakeup.ts`, `src/driver/runner.ts` | Probe gating; `forceToolChoice: 'any'`; `maxSteps: Infinity`; forced-send fallback when nothing is sent |
+| Tools | `src/driver/primary-tools.ts`, `src/driver/tools/*` | `send_message`/`react`/`read_image`/`download_file`/`read_old_messages`/`bash`… |
+| Outbound + self-event | `src/telegram/driver-hooks.ts` | Markdown→Telegram HTML; send; `injectSyntheticEvent` writes the `isSelfSent` canonical event (does not wake the Driver) |
+| Startup | `src/startup/index.ts`, `src/container/**` | Module top-level `tdl.configure({ tdjson })`; container → cold replay → attach Driver → live handlers → telegram.start → activate → postStartup |
+| Configuration | `src/config/config.ts` | `telegram` is required; the `chats.<chatId>` whitelist; `models`/`runtime`/`tools` are platform-independent |
 
-### 1.2 飞书接入必须改动的具体位置
+### 1.2 Exact places that must change for Feishu
 
-按“不改就无法接”到“可以后补”排序。
+Ordered from "cannot connect without changing" to "can be added later".
 
-**A. 消息/回复 ID 类型：number → string（核心）**
+**A. Message/reply ID type: number → string (core)**
 
-- `src/driver/index.ts`：deps 里 `sendMessage` 返回 `{ messageId: number }`、`banSpammer(messageId: number)`、`setMessageReaction(messageId: number)`、`loadMessageAttachments(messageId: number)`、`messageExists(messageId: number)`、`downloadMessageMedia(messageId: number)`。
-- `src/driver/primary-tools.ts`：`sendMessage` 的 `replyToMessageId?: number`、`replyTo ? Number(replyTo) : undefined`、`String(sent.messageId)`。
-- `src/driver/tools/send-message.ts`：`messageExists(messageId: number)`、`Number(reply_to)`、`Number.isFinite` 校验。
-- `src/driver/tools/react.ts`：`messageExists(messageId: number)`、`Number(message_id)`。
-- `src/driver/tools/attachment-downloader.ts`：`file-id` 用 `lastIndexOf(':')` + `parseInt(messageId)` 解析；`om_xxx:0` 会 `NaN`。
-- `src/rendering/index.ts`：`file-id="${messageId}:${index}"`（本身已是字符串，但生成的 ID 类型变了）。
-- `src/telegram/driver-hooks.ts`、`src/telegram/bot.ts`、`src/telegram/manager.ts`、`src/telegram/moderation*.ts`：在 Telegram 侧内部把 string 转回 number（`Number(chatId)`、`serverToTdLibMessageId`），转换点收敛到 Telegram hook 内部。
-- `src/db/persistence.ts`：`persistMessage`/`loadMessageAttachments`/`messageExists`/`persistMessageDelete` 用 `messages.messageId integer`；`src/db/schema.ts` 的 `messages.messageId`/`replyToMessageId` 为 integer。**建议第一版让飞书走 `events` 表绕开该迁移**（见 §4.4）。
-- `src/db/moderation.ts`：`loadModerationMessageIds` 把 `events.messageId` `cast as integer`；这是 Telegram 专用，飞书第一版禁用 `ban_spammer` 即可。
+- `src/driver/index.ts`: in the deps, `sendMessage` returns `{ messageId: number }`, `banSpammer(messageId: number)`, `setMessageReaction(messageId: number)`, `loadMessageAttachments(messageId: number)`, `messageExists(messageId: number)`, `downloadMessageMedia(messageId: number)`.
+- `src/driver/primary-tools.ts`: `replyToMessageId?: number` of `sendMessage`, `replyTo ? Number(replyTo) : undefined`, `String(sent.messageId)`.
+- `src/driver/tools/send-message.ts`: `messageExists(messageId: number)`, `Number(reply_to)`, `Number.isFinite` validation.
+- `src/driver/tools/react.ts`: `messageExists(messageId: number)`, `Number(message_id)`.
+- `src/driver/tools/attachment-downloader.ts`: `file-id` is parsed with `lastIndexOf(':')` + `parseInt(messageId)`; `om_xxx:0` gives `NaN`.
+- `src/rendering/index.ts`: `file-id="${messageId}:${index}"` (itself already a string, but the type of the generated ID changes).
+- `src/telegram/driver-hooks.ts`, `src/telegram/bot.ts`, `src/telegram/manager.ts`, `src/telegram/moderation*.ts`: convert string back to number inside the Telegram side (`Number(chatId)`, `serverToTdLibMessageId`), converging the conversion points inside the Telegram hook.
+- `src/db/persistence.ts`: `persistMessage`/`loadMessageAttachments`/`messageExists`/`persistMessageDelete` use `messages.messageId integer`; `messages.messageId`/`replyToMessageId` in `src/db/schema.ts` are integer. **Suggest that the first version has Feishu go through the `events` table to avoid this migration** (see §4.4).
+- `src/db/moderation.ts`: `loadModerationMessageIds` does `cast as integer` on `events.messageId`; this is Telegram-specific, and the first Feishu version just disables `ban_spammer`.
 
-**B. 平台生命周期与 DI**
+**B. Platform lifecycle and DI**
 
-- `src/startup/index.ts` 顶部 `import * as tdl` + `tdl.configure({ tdjson: resolveTdjson() })` 是模块级副作用：只要进程启动就要求 TDLib 可用。必须改为按平台初始化。
-- `src/container/registrars/telegram.ts`、`tokens.ts`、`registrars/driver.ts`、`registrars/pipeline.ts`、`registrars/media.ts` 全部硬编码 `TELEGRAM_CLIENTS`/`TELEGRAM_MANAGER`/`TELEGRAM_DRIVER_HOOKS`/`TELEGRAM_LIVE_HANDLERS`/`TELEGRAM_POST_STARTUP_TASKS`。
-- `src/pipeline.ts` 的 `botUserId`、`src/container/registrars/driver.ts` 的 `createModerationService`、`bot.raw()`、`bot.botUserId()` 都是 Telegram 形状。
-- `src/telegram/event-sink.ts` 与 `src/telegram/session-ingress-queue.ts` 实际是平台无关的（只依赖 `CanonicalIMEvent` 和 `{chatId}`），推荐原样移动到 `src/im/` 复用，避免飞书复制一份。
-- `src/telegram/post-startup.ts` 是动画 hash 回填，Telegram 专用；飞书第一版空实现。
+- The top of `src/startup/index.ts`, `import * as tdl` + `tdl.configure({ tdjson: resolveTdjson() })`, is a module-level side effect: TDLib must be available as soon as the process starts. It must become per-platform initialization.
+- `src/container/registrars/telegram.ts`, `tokens.ts`, `registrars/driver.ts`, `registrars/pipeline.ts`, `registrars/media.ts` all hardcode `TELEGRAM_CLIENTS`/`TELEGRAM_MANAGER`/`TELEGRAM_DRIVER_HOOKS`/`TELEGRAM_LIVE_HANDLERS`/`TELEGRAM_POST_STARTUP_TASKS`.
+- `botUserId` in `src/pipeline.ts`, and `createModerationService`, `bot.raw()` and `bot.botUserId()` in `src/container/registrars/driver.ts` all have a Telegram shape.
+- `src/telegram/event-sink.ts` and `src/telegram/session-ingress-queue.ts` are actually platform-independent (they depend only on `CanonicalIMEvent` and `{chatId}`); recommend moving them as they are to `src/im/` for reuse so Feishu does not copy them.
+- `src/telegram/post-startup.ts` is the animation hash backfill, Telegram-specific; an empty implementation for the first Feishu version.
 
-**C. 配置**
+**C. Configuration**
 
-- `ConfigSchema.telegram` 必填（`botToken`/`apiId`/`apiHash`）。飞书模式下不应被迫填 Telegram 凭证；需要新增 `feishu` 段并允许二者其一。
-- `chats` 白名单、`blockedUserIds`、`debounce`、`compaction`、`tools` 等可以原样复用，chat id 本来就是字符串（`oc_xxx`）。
+- `ConfigSchema.telegram` is required (`botToken`/`apiId`/`apiHash`). In Feishu mode one should not be forced to fill in Telegram credentials; a `feishu` section must be added and either of the two allowed.
+- `chats` whitelist, `blockedUserIds`, `debounce`, `compaction`, `tools` etc. can be reused as they are; chat ids are strings anyway (`oc_xxx`).
 
-**D. 提示词与“频道名”**
+**D. Prompts and the "channel name"**
 
-- `src/driver/wakeup.ts` 两处 `currentChannel: 'telegram'` 硬编码；`prompts/system.velin.md`（`You are a chatbot, participating in a Telegram group chat.`、Telegram-flavored Markdown、quoted reply 说明）和 `prompts/late-binding.velin.md` 也写明 Telegram。**这属于 driver/人设线的文件**，飞书线只提供 `platformName` 参数，不改提示词策略（见 §5）。
+- `src/driver/wakeup.ts` hardcodes `currentChannel: 'telegram'` in two places; `prompts/system.velin.md` (`You are a chatbot, participating in a Telegram group chat.`, Telegram-flavored Markdown, the quoted-reply description) and `prompts/late-binding.velin.md` also say Telegram. **These are files of the driver/persona line**; the Feishu line only supplies a `platformName` parameter and does not change prompt strategy (see §5).
 
-**E. 出站能力差异（飞书侧实现，不是现有代码 bug）**
+**E. Outbound capability differences (implemented on the Feishu side, not bugs in existing code)**
 
-- Telegram 出站走 `parseTextEntities` + `inputMessageRichMessage`；飞书没有 TDLib 解析器，需要自己的 Markdown 包装（官方推荐 `post` + `md` 标签，见 §2.9）。
-- Telegram 用 `sendChatAction` 发送 typing；**未见飞书机器人有对应的 typing 指示 API**（【待验证】），飞书 hook 应 no-op，并把 chat 配置 `sendTypingAction: false`。
-- `setMessageReaction` 在 Telegram 传 unicode emoji；飞书要传枚举 `emoji_type`（`SMILE`/`THUMBSUP`…），且删除需要 `reaction_id`（见 §2.9）。
-- 附件：Telegram 用 `(chatId, messageId)` 重新 `getMessage` 下载；飞书用 `(message_id, file_key, type)` 调 `message_resource`，所以飞书侧的 `downloadMessageMedia` 需要用已存的事件内容找出 `file_key`（第一版媒体不启用，可先返回失败）。
+- Telegram outbound uses `parseTextEntities` + `inputMessageRichMessage`; Feishu has no TDLib parser and needs its own Markdown wrapping (officially recommended `post` + `md` tag, see §2.9).
+- Telegram sends typing with `sendChatAction`; **no typing indicator API for a Feishu bot was found** ([to verify]); the Feishu hook should be a no-op, and the chat config set `sendTypingAction: false`.
+- `setMessageReaction` passes a unicode emoji in Telegram; Feishu needs the enum `emoji_type` (`SMILE`/`THUMBSUP`…), and deletion needs a `reaction_id` (see §2.9).
+- Attachments: Telegram re-downloads with `(chatId, messageId)` through `getMessage`; Feishu calls `message_resource` with `(message_id, file_key, type)`, so the Feishu-side `downloadMessageMedia` needs to find the `file_key` from the stored event content (media is not enabled in the first version, so it may return failure for now).
 
-**F. 可以不动的部分**
+**F. Parts that need no change**
 
-`src/adaptation/types.ts`（canonical 类型已经是平台无关的粗粒度形状）、`src/projection/**`、`src/rendering/**` 主体、`src/driver/{scheduler,runner,turn-loop,compaction*,context,merge}.ts`、`src/llm/**`、`src/unified-api/**`、`src/media/**`（媒体后期再接，接口本身平台无关）、`src/background-task/**`。这些是“复用现有工程”的主体。
+`src/adaptation/types.ts` (the canonical types are already a platform-independent coarse shape), `src/projection/**`, the main body of `src/rendering/**`, `src/driver/{scheduler,runner,turn-loop,compaction*,context,merge}.ts`, `src/llm/**`, `src/unified-api/**`, `src/media/**` (media connected later; the interface itself is platform-independent), `src/background-task/**`. These are the bulk of "reusing the existing engineering".
 
 ---
 
-## 2. 飞书/Lark 平台事实核实
+## 2. Verified facts about the Feishu/Lark platform
 
-官方文档支持在 URL 后加 `.md` 直接取 Markdown（官方 CLI README 明确说明：任意开放平台文档 URL 加 `.md` 即可）。下面链接均为本次实际抓取过的原文。
+The official documentation supports appending `.md` to a URL to get the Markdown directly (the official CLI README states it explicitly: append `.md` to any Open Platform documentation URL). The links below are all originals actually fetched in this research.
 
-### 2.1 环境与长连接
+### 2.1 Environment and the long connection
 
-**【事实】**
+**[Fact]**
 
-- 长连接（WebSocket）与 webhook 两种订阅方式并存；长连接**仅支持企业自建应用**（store app 不支持），需要本机可访问公网，不需要公网 IP/域名。
-- 收到事件后**必须在 3 秒内处理完成且不抛异常**，否则触发超时重推。
-- 每个应用最多 50 个长连接。
-- 推送是**集群模式，不支持广播**：同一应用部署多个客户端时，只有**其中随机一个**会收到某条事件。
-- 国内版飞书与国际版 Lark 通过 SDK 的 `domain` 区分（`feishu` / `lark`）；AstrBot 文档明确“国内版和国际版飞书均支持长连接”。
-- 官方 SDK：`@larksuiteoapi/node-sdk`（MIT，1.76.0），`WSClient.start({ eventDispatcher })` 从 1.24.0 起支持；`Channel.connect()` 会在 15 秒内等真实握手。
-- 事件与回调是开发者后台两个配置项；`card.action.trigger` 回调可以走同一条长连接（官方 CLI 文档明确“events are delivered over the existing WebSocket long connection — no additional [URL]”，但 Node SDK README 在别处写过“长连接模式仅支持事件订阅，不支持回调订阅”，**两处口径不一致，需在目标应用验证**）。
+- The long connection (WebSocket) and webhook subscription methods coexist; the long connection **supports only enterprise self-built apps** (store apps are not supported), needs the local machine to be able to reach the public internet, and needs no public IP/domain.
+- After receiving an event it **must finish processing within 3 seconds and not throw**, otherwise a timeout re-push is triggered.
+- At most 50 long connections per app.
+- Pushes are **cluster mode and do not support broadcast**: when one app deploys several clients, only **one of them, at random**, receives a given event.
+- The China edition Feishu and the international edition Lark are distinguished through the SDK's `domain` (`feishu` / `lark`); the AstrBot documentation states explicitly "both the China and the international edition of Feishu support the long connection".
+- Official SDK: `@larksuiteoapi/node-sdk` (MIT, 1.76.0), `WSClient.start({ eventDispatcher })` supported since 1.24.0; `Channel.connect()` waits for a real handshake within 15 seconds.
+- Events and callbacks are two configuration items in the developer console; `card.action.trigger` callbacks can go over the same long connection (the official CLI docs say explicitly "events are delivered over the existing WebSocket long connection — no additional [URL]", but the Node SDK README says elsewhere that "long-connection mode supports only event subscription, not callback subscription"; **the two statements disagree and must be verified in the target app**).
 
-证据：  
-- 长连接模式：<https://open.feishu.cn/document/uAjLw4CM/ukTMukTMukTM/event-subscription-guide/long-connection-mode>  
-- Node SDK README（长连接示例与注意事项）：<https://github.com/larksuite/node-sdk/blob/b188be60134d409b61259546bcf69c731d2b0b7c/README.md#L557>  
-- `Channel.connect()`：<https://github.com/larksuite/node-sdk/blob/b188be60134d409b61259546bcf69c731d2b0b7c/channel/channel.ts#L103>  
-- AstrBot 文档（domain 与 socket/webhook）：<https://github.com/AstrBotDevs/AstrBot/blob/9441402872f65fffc35685b0ead5bd3337033cb2/docs/zh/platform/lark.md#L81>  
-- CLI card 回调走 WS：<https://github.com/larksuite/cli/blob/017b19a793ad71794a02887ede04757f3d82e10d/skills/lark-im/references/lark-im-card-action-reply.md>
+Evidence:  
+- Long-connection mode: <https://open.feishu.cn/document/uAjLw4CM/ukTMukTMukTM/event-subscription-guide/long-connection-mode>  
+- Node SDK README (long-connection example and notes): <https://github.com/larksuite/node-sdk/blob/b188be60134d409b61259546bcf69c731d2b0b7c/README.md#L557>  
+- `Channel.connect()`: <https://github.com/larksuite/node-sdk/blob/b188be60134d409b61259546bcf69c731d2b0b7c/channel/channel.ts#L103>  
+- AstrBot docs (domain and socket/webhook): <https://github.com/AstrBotDevs/AstrBot/blob/9441402872f65fffc35685b0ead5bd3337033cb2/docs/zh/platform/lark.md#L81>  
+- CLI card callbacks over WS: <https://github.com/larksuite/cli/blob/017b19a793ad71794a02887ede04757f3d82e10d/skills/lark-im/references/lark-im-card-action-reply.md>
 
-**【建议】** 飞书进程只跑**一个** WS 客户端；不要同时跑 CLI 的 `event consume` 或第二个实例，否则事件随机分投，双方都会缺事件。
+**[Suggestion]** The Feishu process should run only **one** WS client; do not run the CLI's `event consume` or a second instance at the same time, otherwise events are distributed at random and both sides miss events.
 
-### 2.2 群全量消息权限
+### 2.2 Permission for all group messages
 
-**【事实】** `im:message.receive_v1` 的权限决定“能看到什么”，不是同一个 scope：
+**[Fact]** The permissions for `im:message.receive_v1` decide "what can be seen"; they are not one scope:
 
-| 想接收 | 需要的权限 |
+| Want to receive | Permission needed |
 | --- | --- |
-| 单聊 | `im:message.p2p_msg` 或 `im:message.p2p_msg:readonly` |
-| 群里 @ 机器人（用户+其他机器人） | `im:message.group_at_msg.include_bot:readonly` |
-| 群里 @ 机器人（仅用户） | `im:message.group_at_msg` 或 `im:message.group_at_msg:readonly` |
-| 群里**所有**消息（用户+其他机器人，不含自己） | `im:message.group_msg.include_bot:read` |
-| 群里所有消息（不含机器人消息） | `im:message.group_msg`（官方在订阅列表里标注“敏感权限”） |
+| Private chat | `im:message.p2p_msg` or `im:message.p2p_msg:readonly` |
+| @-mentions of the bot in groups (users + other bots) | `im:message.group_at_msg.include_bot:readonly` |
+| @-mentions of the bot in groups (users only) | `im:message.group_at_msg` or `im:message.group_at_msg:readonly` |
+| **All** messages in groups (users + other bots, not itself) | `im:message.group_msg.include_bot:read` |
+| All messages in groups (without bot messages) | `im:message.group_msg` (the official subscription list marks it "sensitive permission") |
 
-默认只推 @ 机器人的群消息；要“旁听”必须开 `im:message.group_msg`，而它被标记为敏感权限、需要发布版本（很可能需要企业管理员审批）。群历史查询 `GET /im/v1/messages` 在应用身份下也要求先有单聊场景的权限、再开 `im:message.group_msg`。
+By default only group messages that @-mention the bot are pushed; to "listen in", `im:message.group_msg` must be enabled, and it is marked a sensitive permission and requires publishing a version (likely needing enterprise administrator approval). The group history query `GET /im/v1/messages` under app identity also requires the private-chat permission first, and then `im:message.group_msg`.
 
-证据：  
-- 接收消息事件（权限与“特殊情况可能重复推送，请用 message_id 去重”）：<https://open.feishu.cn/document/uAjLw4CM/ukTMukTMukTM/reference/im-v1/message/events/receive>  
-- 历史消息（群聊需 `im:message.group_msg`）：<https://open.feishu.cn/document/uAjLw4CM/ukTMukTMukTM/reference/im-v1/message/list>  
-- AstrBot 文档（`im:message.group_msg` 与一键权限链接）：<https://github.com/AstrBotDevs/AstrBot/blob/9441402872f65fffc35685b0ead5bd3337033cb2/docs/zh/platform/lark.md#L38>
+Evidence:  
+- Receive-message event (permissions and "in special cases duplicates may be pushed, deduplicate by message_id"): <https://open.feishu.cn/document/uAjLw4CM/ukTMukTMukTM/reference/im-v1/message/events/receive>  
+- History messages (groups need `im:message.group_msg`): <https://open.feishu.cn/document/uAjLw4CM/ukTMukTMukTM/reference/im-v1/message/list>  
+- AstrBot docs (`im:message.group_msg` and the one-click permission link): <https://github.com/AstrBotDevs/AstrBot/blob/9441402872f65fffc35685b0ead5bd3337033cb2/docs/zh/platform/lark.md#L38>
 
-### 2.3 稳定 user/open/union ID 与机器人自身身份
+### 2.3 Stable user/open/union IDs and the bot's own identity
 
-**【事实】** 官方用户身份模型：
+**[Fact]** The official user identity model:
 
-| ID | 范围 | 稳定性 | 备注 |
+| ID | Scope | Stability | Notes |
 | --- | --- | --- | --- |
-| `lark_id` | 全局 | 稳定 | 开发者不可见，无需关注 |
-| `user_id` | 租户 | 租户内稳定 | 即 employee_id；要拿到需要敏感字段权限 `contact:user.employee_id:readonly` |
-| `open_id` | 应用 | 单应用内稳定，换应用会变 | 事件里**始终存在**（`ou_` 前缀）；**禁止跨应用使用** |
-| `union_id` | 开发者/服务商 | 同一服务商多个应用间稳定 | `on_` 前缀；同一开发主体的多应用可关联 |
+| `lark_id` | Global | Stable | Not visible to developers; no need to care |
+| `user_id` | Tenant | Stable within the tenant | That is, employee_id; obtaining it needs the sensitive field permission `contact:user.employee_id:readonly` |
+| `open_id` | App | Stable within one app, changes across apps | **Always present** in events (`ou_` prefix); **must not be used across apps** |
+| `union_id` | Developer/ISV | Stable across multiple apps of the same ISV | `on_` prefix; multiple apps of the same developer entity can be linked |
 
-事件里 `sender.sender_id` 同时可能带 `open_id`/`user_id`/`union_id`，取决于租户的 `sender_id_type` 设置；`user_id` 缺失是正常的。Hermes 的实现注释把这一点写得很清楚，并把 `union_id` 当作跨应用稳定的备用身份、`open_id` 作为主键回退。
+`sender.sender_id` in an event may carry `open_id`/`user_id`/`union_id` at the same time, depending on the tenant's `sender_id_type` setting; a missing `user_id` is normal. The comments in Hermes' implementation spell this out, and treat `union_id` as a backup identity that is stable across apps and `open_id` as the primary-key fallback.
 
-机器人自身身份：`GET /open-apis/bot/v3/info`（tenant token）返回 `bot.open_id` 与 `bot.app_name`，这也是群里 @ 机器人时 `mentions[].id.open_id` 的值。nanobot、AstrBot、官方 node-sdk `Channel` 三处实现都走这个接口。
+The bot's own identity: `GET /open-apis/bot/v3/info` (tenant token) returns `bot.open_id` and `bot.app_name`, which is also the value of `mentions[].id.open_id` when the bot is @-mentioned in a group. The nanobot, AstrBot and official node-sdk `Channel` implementations all use this endpoint.
 
-证据：  
-- 官方用户身份概述：<https://open.feishu.cn/document/home/user-identity-introduction/introduction>  
-- Hermes 适配器文件头的身份模型注释：<https://github.com/NousResearch/hermes-agent/blob/53bec2a311979ad6f77580ba491eca261ab988e0/plugins/platforms/feishu/adapter.py#L1>  
-- node-sdk `fetchBotIdentity()`：<https://github.com/larksuite/node-sdk/blob/b188be60134d409b61259546bcf69c731d2b0b7c/channel/channel.ts#L406>  
-- nanobot `_fetch_bot_open_id()`：<https://github.com/HKUDS/nanobot/blob/67248790c76b150af39dab5026608ee2c449b0d3/nanobot/channels/feishu/runtime.py#L1173>  
-- AstrBot `request_lark_bot_info()`：<https://github.com/AstrBotDevs/AstrBot/blob/9441402872f65fffc35685b0ead5bd3337033cb2/astrbot/core/platform/sources/lark/bot_info.py>
+Evidence:  
+- Official user identity overview: <https://open.feishu.cn/document/home/user-identity-introduction/introduction>  
+- Identity-model comment at the top of the Hermes adapter file: <https://github.com/NousResearch/hermes-agent/blob/53bec2a311979ad6f77580ba491eca261ab988e0/plugins/platforms/feishu/adapter.py#L1>  
+- node-sdk `fetchBotIdentity()`: <https://github.com/larksuite/node-sdk/blob/b188be60134d409b61259546bcf69c731d2b0b7c/channel/channel.ts#L406>  
+- nanobot `_fetch_bot_open_id()`: <https://github.com/HKUDS/nanobot/blob/67248790c76b150af39dab5026608ee2c449b0d3/nanobot/channels/feishu/runtime.py#L1173>  
+- AstrBot `request_lark_bot_info()`: <https://github.com/AstrBotDevs/AstrBot/blob/9441402872f65fffc35685b0ead5bd3337033cb2/astrbot/core/platform/sources/lark/bot_info.py>
 
-**【建议】** 第一版 `CanonicalUser.id = open_id`（事件里必有、单应用内稳定），同时把 `user_id`/`union_id`（若事件里有）存进 existing 的 `CanonicalUser` 扩展字段或 `events.sender` JSON，供未来跨应用/跨租户迁移和逐人记忆使用；**不要**在缺少 `user_id` 时编造。`displayName` 需要额外解析（事件里发送者只有 ID，没有昵称）：AstrBot/Hermes 都用通讯录 `GET /contact/v3/users/:id` 并做缓存，建议照做（见 §6.3 权限）。
+**[Suggestion]** In the first version `CanonicalUser.id = open_id` (always in events, stable within one app), and also store `user_id`/`union_id` (if present in the event) in an existing `CanonicalUser` extension field or the `events.sender` JSON, for future cross-app / cross-tenant migration and per-person memory; **do not** make up a `user_id` when it is missing. `displayName` needs extra resolution (the sender in an event has only an ID and no display name): AstrBot/Hermes both use the contacts `GET /contact/v3/users/:id` with caching, and it is recommended to do the same (see the §6.3 permissions).
 
-**【待验证】** 目标租户的 `sender_id_type` 实际返回哪些 ID；`contact:user.base:readonly` 之类的昵称 scope 是否需管理员审批；企业是否开启“外部群/外部用户”。
+**[To verify]** Which IDs the target tenant's `sender_id_type` actually returns; whether name scopes such as `contact:user.base:readonly` need administrator approval; whether the enterprise has enabled "external groups / external users".
 
-### 2.4 @、引用、thread/话题
+### 2.4 @-mentions, quotes, thread/topic
 
-**【事实】**
+**[Fact]**
 
-- 文本消息里 @ 会被替换成 `@_user_N` 占位符，真实对象在 `message.mentions[]`：`{key, id:{open_id,user_id,union_id}, name, mentioned_type}`。@all 在 content 里是 `@_all`。
-- 回复/话题：`root_id`（根消息）、`parent_id`（直接父消息）、`thread_id`（话题 ID）。**话题内回复的 `root_id` 和 `parent_id` 都指向话题根消息**。
-- 接收事件不带被引用消息的正文；要引用内容必须再调 `GET /im/v1/messages/:message_id`（nanobot、AstrBot、Hermes 都这么做）。
-- 发送侧用 `reply` 接口 + `reply_in_thread` 可指定“以话题形式回复”；`root_id`/`thread_id` 会在回复响应里返回。话题群不支持 `reply_in_thread` 时会报 `230071`。
+- In a text message an @ is replaced with an `@_user_N` placeholder, and the real object is in `message.mentions[]`: `{key, id:{open_id,user_id,union_id}, name, mentioned_type}`. @all in the content is `@_all`.
+- Reply/topic: `root_id` (the root message), `parent_id` (the direct parent message), `thread_id` (the topic ID). **For a reply inside a topic, both `root_id` and `parent_id` point to the topic root message**.
+- The receive event does not carry the body of the quoted message; to get the quoted content you must call `GET /im/v1/messages/:message_id` again (nanobot, AstrBot and Hermes all do so).
+- On the send side the `reply` endpoint + `reply_in_thread` can specify "reply in topic form"; `root_id`/`thread_id` are returned in the reply response. When a topic group does not support `reply_in_thread` it reports `230071`.
 
-证据：  
-- 消息管理概述（root/parent/thread/deleted/updated 字段）：<https://open.feishu.cn/document/uAjLw4CM/ukTMukTMukTM/reference/im-v1/message/intro>  
-- 回复消息：<https://open.feishu.cn/document/uAjLw4CM/ukTMukTMukTM/reference/im-v1/message/reply>  
-- nanobot 引用内容拉取：<https://github.com/HKUDS/nanobot/blob/67248790c76b150af39dab5026608ee2c449b0d3/nanobot/channels/feishu/runtime.py#L2752> 附近  
-- AstrBot 引用解析：<https://github.com/AstrBotDevs/AstrBot/blob/9441402872f65fffc35685b0ead5bd3337033cb2/astrbot/core/platform/sources/lark/lark_adapter.py#L407>
+Evidence:  
+- Message management overview (root/parent/thread/deleted/updated fields): <https://open.feishu.cn/document/uAjLw4CM/ukTMukTMukTM/reference/im-v1/message/intro>  
+- Reply to message: <https://open.feishu.cn/document/uAjLw4CM/ukTMukTMukTM/reference/im-v1/message/reply>  
+- nanobot quote-content fetching: <https://github.com/HKUDS/nanobot/blob/67248790c76b150af39dab5026608ee2c449b0d3/nanobot/channels/feishu/runtime.py#L2752> and nearby  
+- AstrBot quote parsing: <https://github.com/AstrBotDevs/AstrBot/blob/9441402872f65fffc35685b0ead5bd3337033cb2/astrbot/core/platform/sources/lark/lark_adapter.py#L407>
 
-**【建议】** 第一版：`parent_id → CanonicalMessageEvent.replyToMessageId`；引用正文优先复用 Pipeline 的 `replyToPreview`/`replyToContent` 快照（父消息还在 IC 里时天然可用），并增加“按需拉取父消息并缓存”的补强（一次 API 调用，失败软降级）。**不按 thread 拆会话**（符合“不需要多对话管理”），但把 `thread_id` 作为可选字段透传并在渲染时作为属性输出，避免话题群里模型误读上下文。
+**[Suggestion]** First version: `parent_id → CanonicalMessageEvent.replyToMessageId`; for the quoted text, prefer reusing the Pipeline's `replyToPreview`/`replyToContent` snapshot (naturally available while the parent message is still in the IC), and add the reinforcement "fetch the parent message on demand and cache it" (one API call, soft degradation on failure). **Do not split conversations by thread** (consistent with "no multi-conversation management needed"), but pass `thread_id` through as an optional field and output it as an attribute at render time, to keep the model from misreading context in topic groups.
 
-### 2.5 事件目录、去重与重推
+### 2.5 Event catalogue, deduplication and re-push
 
-**【事实】** 官方 Node SDK 事件类型表里 IM 域共 13 个事件（本次枚举）：
+**[Fact]** In the official Node SDK event type table the IM domain has 13 events (enumerated in this research):
 
 ```
 im.message.receive_v1              im.message.message_read_v1
@@ -204,277 +204,277 @@ im.chat.member.user.deleted_v1     im.chat.member.user.withdrawn_v1
 im.chat.access_event.bot_p2p_chat_entered_v1
 ```
 
-- **没有消息编辑事件**。
-- `im.message.reaction.created_v1` 只带 message_id / emoji_type / operator / action_time，**不带 `reaction_id`**；机器人只能删除自己添加的表情，所以删除要靠自己 create 时缓存的 `reaction_id`。
-- 官方接收事件文档明确：“特殊情况下可能会收到重复的推送，如有幂等需求请使用 `message_id` 去重，不要依赖 `event_id`。” 长连接的 3 秒超时重推是重复的另一来源。
-- AstrBot 用 `event_id` 去重（30 分钟窗口），与官方建议相悖；nanobot 用 `message_id` 的 1000 条内存 LRU（重启即丢）；Hermes 用 `message_id` + 时间戳、带 TTL、落盘 JSON 跨重启。
+- **There is no message edit event**.
+- `im.message.reaction.created_v1` carries only message_id / emoji_type / operator / action_time and **no `reaction_id`**; a bot can only delete reactions it added itself, so deletion depends on the `reaction_id` it cached at create time.
+- The official receive-event doc states: "in special cases duplicate pushes may be received; if you need idempotency please use `message_id` to deduplicate, and do not rely on `event_id`." The 3-second timeout re-push of the long connection is another source of duplicates.
+- AstrBot deduplicates by `event_id` (30-minute window), contrary to the official advice; nanobot uses a 1000-entry in-memory LRU of `message_id` (lost on restart); Hermes uses `message_id` + timestamp, with a TTL, persisted to a JSON file across restarts.
 
-证据：  
-- 事件类型完整表：<https://github.com/larksuite/node-sdk/blob/b188be60134d409b61259546bcf69c731d2b0b7c/code-gen/events-template.ts#L4309>（recalled）、`#L4426`（receive）  
-- 官方接收事件“用 message_id 去重”：见 §2.2 链接  
-- AstrBot `_is_duplicate_event`：<https://github.com/AstrBotDevs/AstrBot/blob/9441402872f65fffc35685b0ead5bd3337033cb2/astrbot/core/platform/sources/lark/lark_adapter.py#L528>  
-- nanobot dedup：<https://github.com/HKUDS/nanobot/blob/67248790c76b150af39dab5026608ee2c449b0d3/nanobot/channels/feishu/runtime.py#L2678>  
-- Hermes 持久化 dedup：<https://github.com/NousResearch/hermes-agent/blob/53bec2a311979ad6f77580ba491eca261ab988e0/plugins/platforms/feishu/adapter.py#L3550>、`#L3592`
+Evidence:  
+- Full event type table: <https://github.com/larksuite/node-sdk/blob/b188be60134d409b61259546bcf69c731d2b0b7c/code-gen/events-template.ts#L4309> (recalled), `#L4426` (receive)  
+- Official receive event "deduplicate by message_id": see the link in §2.2  
+- AstrBot `_is_duplicate_event`: <https://github.com/AstrBotDevs/AstrBot/blob/9441402872f65fffc35685b0ead5bd3337033cb2/astrbot/core/platform/sources/lark/lark_adapter.py#L528>  
+- nanobot dedup: <https://github.com/HKUDS/nanobot/blob/67248790c76b150af39dab5026608ee2c449b0d3/nanobot/channels/feishu/runtime.py#L2678>  
+- Hermes persistent dedup: <https://github.com/NousResearch/hermes-agent/blob/53bec2a311979ad6f77580ba491eca261ab988e0/plugins/platforms/feishu/adapter.py#L3550>, `#L3592`
 
-**【建议】** 三层去重：① 内存 LRU（挡住 3 秒重推）；② **落库判定**：发布前查该 `(chatId, messageId)` 是否已有 canonical 事件，有则跳过（跨重启）；③ 出站发送带 `uuid`（1 小时内同 uuid 至多成功一条），避免重试造成重复发言。**不要用 event_id**。
+**[Suggestion]** Three layers of deduplication: ① an in-memory LRU (blocks the 3-second re-push); ② **a persistence check**: before publishing, check whether a canonical event already exists for that `(chatId, messageId)`, and skip if so (across restarts); ③ outbound sends carry a `uuid` (the same uuid succeeds at most once within 1 hour), so retries do not cause duplicate speech. **Do not use event_id**.
 
-### 2.6 编辑与删除（撤回）事件支持与限制
+### 2.6 Edit and delete (recall) event support and limits
 
-**【事实】**
+**[Fact]**
 
-- 撤回：`im.message.recalled_v1`，只有在机器人所在的会话内才会推送；字段为 `message_id`、`chat_id`、`recall_time`、`recall_type`（message_owner / group_owner / group_manager / enterprise_manager），**没有操作人 ID**。订阅该事件需要 `im:message` 或 `im:message:readonly`。
-- 撤回耗时 1 年的限制只针对“机器人在群里撤回他人消息”（需要机器人是群主/管理员/创建者且消息不超过 1 年）；机器人撤回自己的消息没有这条 1 年限制，但受企业管理员设置的撤回时限约束。
-- 编辑：无事件。拉取消息时可看到 `updated`/`update_time`；`im.message.receive_v1` 里 `message.update_time` 只在消息被编辑过且被重新投递时可能非空（**【待验证】** 实际行为）。
+- Recall: `im.message.recalled_v1`, pushed only inside conversations where the bot is present; fields are `message_id`, `chat_id`, `recall_time`, `recall_type` (message_owner / group_owner / group_manager / enterprise_manager), **with no operator ID**. Subscribing to this event needs `im:message` or `im:message:readonly`.
+- The 1-year limit on recall age applies only to "the bot recalling other people's messages in a group" (the bot must be the group owner/administrator/creator and the message no older than 1 year); the bot recalling its own message has no such 1-year limit, but is bound by the recall time limit set by the enterprise administrator.
+- Edit: no event. `updated`/`update_time` can be seen when fetching messages; in `im.message.receive_v1`, `message.update_time` may be non-empty only when the message was edited and delivered again (**[to verify]** actual behaviour).
 
-证据：  
-- 撤回事件：<https://open.feishu.cn/document/uAjLw4CM/ukTMukTMukTM/reference/im-v1/message/events/recalled>  
-- 撤回接口限制：<https://open.feishu.cn/document/uAjLw4CM/ukTMukTMukTM/reference/im-v1/message/delete>
+Evidence:  
+- Recall event: <https://open.feishu.cn/document/uAjLw4CM/ukTMukTMukTM/reference/im-v1/message/events/recalled>  
+- Recall endpoint limits: <https://open.feishu.cn/document/uAjLw4CM/ukTMukTMukTM/reference/im-v1/message/delete>
 
-**【建议】** 第一版把 `im.message.recalled_v1` 映射为 canonical `delete` 事件（不改动 Projection：现有 reducer 会把目标节点标记 `deleted`）。`CanonicalEditEvent` 保留类型但飞书不产生；文档明确“飞书编辑不可见”，并把“若需要显示编辑，只能在拉取历史/引用时以 `updated` 字段补标”记为后续工作。
+**[Suggestion]** In the first version map `im.message.recalled_v1` to a canonical `delete` event (Projection unchanged: the existing reducer marks the target node `deleted`). `CanonicalEditEvent` keeps its type but Feishu does not produce it; the document states "Feishu edits are invisible", and records "if edits need to be shown, they can only be marked from the `updated` field when fetching history / quotes" as future work.
 
-### 2.7 历史补查
+### 2.7 History lookup
 
-**【事实】**
+**[Fact]**
 
-- `GET /im/v1/messages`（container_id_type=chat）支持 `start_time`/`end_time`（秒级）、`sort_type`、`page_size` ≤ 50，接口限频 1000 次/分、50 次/秒。
-- 应用身份读群消息要求 `im:message.group_msg`；机器人必须在群里。
-- 长连接掉线期间的事件不会补发（只有 3 秒超时重推），所以“断线补洞”只能靠自己用历史接口回查。
-- **【待验证】** 机器人**入群之前**的历史消息能否读到（文档只写“机器人必须在被查询的群组中”，未写时间边界）；外部群、话题群的历史行为也需实测。因此**不保证能看到全部历史**。
+- `GET /im/v1/messages` (container_id_type=chat) supports `start_time`/`end_time` (seconds), `sort_type`, `page_size` ≤ 50, with endpoint rate limits of 1000 per minute and 50 per second.
+- Reading group messages under app identity needs `im:message.group_msg`; the bot must be in the group.
+- Events during a long-connection outage are not replayed (only the 3-second timeout re-push), so "gap filling after a disconnect" can only be done by querying back with the history endpoint ourselves.
+- **[To verify]** Whether history from **before the bot joined** the group can be read (the docs say only "the bot must be in the queried group" and give no time boundary); the history behaviour of external groups and topic groups also needs testing. So **seeing all history is not guaranteed**.
 
-**【建议】** 第一版把补洞做成可选的启动/重连动作：以本地最后一条事件的 `timestampSec` 为 `start_time`，`ByCreateTimeAsc` 翻页，逐条走同一套 dedup + canonical 流程（幂等，不会重复）。补洞失败只记日志，不阻塞主流程。入群前历史不在承诺范围内。
+**[Suggestion]** In the first version make gap filling an optional startup/reconnect action: take the `timestampSec` of the last local event as `start_time`, page with `ByCreateTimeAsc`, and run each entry through the same dedup + canonical flow (idempotent, no duplicates). A failure in gap filling is only logged and does not block the main flow. History from before joining the group is outside the promise.
 
-### 2.8 成员信息
+### 2.8 Member information
 
-**【事实】** `GET /im/v1/chats/:chat_id/members`：不返回机器人成员；同一时间入群的人会一次性返回，所以返回条数可能少于也可能多于 `page_size`；`page_size` ≤ 100；支持 `member_id_type`（open_id/union_id/user_id）；需要 `im:chat`/`im:chat:readonly`/`im:chat.members:read`。群信息 `GET /im/v1/chats/:chat_id` 返回群名、群类型、外部群标记、各类权限设置。入群事件 `im.chat.member.user.added_v1` 自带 `users[].name` 与群名。
+**[Fact]** `GET /im/v1/chats/:chat_id/members`: does not return bot members; people who joined at the same time are returned in one batch, so the number of returned entries may be less or more than `page_size`; `page_size` ≤ 100; supports `member_id_type` (open_id/union_id/user_id); needs `im:chat`/`im:chat:readonly`/`im:chat.members:read`. The chat info `GET /im/v1/chats/:chat_id` returns the group name, group type, the external-group flag and the various permission settings. The join event `im.chat.member.user.added_v1` carries `users[].name` and the group name.
 
-证据：  
-- 群成员：<https://open.feishu.cn/document/uAjLw4CM/ukTMukTMukTM/reference/im-v1/chat-members/get>  
-- 群信息：<https://open.feishu.cn/document/uAjLw4CM/ukTMukTMukTM/reference/im-v1/chat/get>  
-- 官方 CLI 成员/群命令：<https://github.com/larksuite/cli/blob/017b19a793ad71794a02887ede04757f3d82e10d/affordance/im.md>（`+chat-members-list`、`+chat-search`）
+Evidence:  
+- Chat members: <https://open.feishu.cn/document/uAjLw4CM/ukTMukTMukTM/reference/im-v1/chat-members/get>  
+- Chat info: <https://open.feishu.cn/document/uAjLw4CM/ukTMukTMukTM/reference/im-v1/chat/get>  
+- Official CLI member/chat commands: <https://github.com/larksuite/cli/blob/017b19a793ad71794a02887ede04757f3d82e10d/affordance/im.md> (`+chat-members-list`, `+chat-search`)
 
-**【建议】** 第一版用“事件里的名字 + 通讯录按需解析”为主，群成员列表作为后续“人物记忆”的补充数据源；不要依赖成员列表推断“群里有哪些人”。
+**[Suggestion]** In the first version rely mainly on "names in events + on-demand contacts resolution", and treat the member list as a supplementary data source for later "person memory"; do not rely on the member list to infer "who is in the group".
 
-### 2.9 发送、表情、附件
+### 2.9 Sending, reactions, attachments
 
-**【事实】** 发送（`POST /im/v1/messages`）：
+**[Fact]** Sending (`POST /im/v1/messages`):
 
-- `receive_id_type`：open_id / union_id / user_id / email / chat_id；用户推荐 open_id。
-- 限频：向同一用户 5 QPS，向同一群 5 QPS（**全群机器人共享**）；接口级 1000/分、50/秒。
-- `msg_type`：text / post / image / file / audio / media / sticker / interactive / share_chat / share_user / system；文本 ≤150KB，卡片/富文本 ≤30KB。
-- **Markdown 官方推荐 `post` + `md` 标签**：CommonMark 0.31 + GFM（表格、任务列表、删除线、自动链接），额外支持 `<at user_id="ou_xxx">名字</at>`、`<at user_id="all"></at>`、`![alt](img_v3_xxx)`。示例 content：`{"zh_cn":{"content":[[{"tag":"md","text":"..."}]]}}`。
-- `uuid` 参数用于发送去重：同 uuid 1 小时内至多成功一条（≤50 字符）。
-- 回复用 `POST /im/v1/messages/:message_id/reply`，支持 `reply_in_thread`。
+- `receive_id_type`: open_id / union_id / user_id / email / chat_id; open_id is recommended for users.
+- Rate limits: 5 QPS to the same user, 5 QPS to the same group (**shared by all bots in the group**); endpoint level 1000/minute, 50/second.
+- `msg_type`: text / post / image / file / audio / media / sticker / interactive / share_chat / share_user / system; text ≤150KB, cards/rich text ≤30KB.
+- **For Markdown the official recommendation is `post` + the `md` tag**: CommonMark 0.31 + GFM (tables, task lists, strikethrough, autolinks), plus `<at user_id="ou_xxx">name</at>`, `<at user_id="all"></at>` and `![alt](img_v3_xxx)`. Example content: `{"zh_cn":{"content":[[{"tag":"md","text":"..."}]]}}`.
+- The `uuid` parameter is used for send deduplication: the same uuid succeeds at most once within 1 hour (≤50 characters).
+- Replies use `POST /im/v1/messages/:message_id/reply`, which supports `reply_in_thread`.
 
-表情（`POST /im/v1/messages/:message_id/reactions`）：
+Reactions (`POST /im/v1/messages/:message_id/reactions`):
 
-- 传枚举 `reaction_type.emoji_type`（如 `SMILE`、`THUMBSUP`），不是 unicode；需要 `im:message` 或 `im:message.reactions:write_only`；机器人/用户必须在会话内。删除需要 `reaction_id`（create 响应里有）。
+- Pass the enum `reaction_type.emoji_type` (such as `SMILE`, `THUMBSUP`), not unicode; needs `im:message` or `im:message.reactions:write_only`; the bot/user must be in the conversation. Deletion needs a `reaction_id` (in the create response).
 
-附件：先 `POST /im/v1/images` 或 `/im/v1/files` 上传拿 key，再用 key 发消息；音频/视频上传需要时长；机器人只能发自己上传的文件（错误码 230017）。下载用 `GET /im/v1/messages/:message_id/resources/:file_key?type=image|file`，需要 `im:resource`。
+Attachments: first upload with `POST /im/v1/images` or `/im/v1/files` to get a key, then send the message with the key; audio/video upload needs the duration; a bot can only send files it uploaded itself (error code 230017). Download with `GET /im/v1/messages/:message_id/resources/:file_key?type=image|file`, which needs `im:resource`.
 
-证据：  
-- 发送消息：<https://open.feishu.cn/document/uAjLw4CM/ukTMukTMukTM/reference/im-v1/message/create>  
-- 发送内容与 `md` 标签：<https://open.feishu.cn/document/uAjLw4CM/ukTMukTMukTM/im-v1/message/create_json>  
-- 回复：<https://open.feishu.cn/document/uAjLw4CM/ukTMukTMukTM/reference/im-v1/message/reply>  
-- 表情 create：<https://open.feishu.cn/document/uAjLw4CM/ukTMukTMukTM/reference/im-v1/message-reaction/create>  
-- 接收内容结构：<https://open.feishu.cn/document/uAjLw4CM/ukTMukTMukTM/im-v1/message/events/message_content>  
-- node-sdk 的 reactions 约束说明：<https://github.com/larksuite/node-sdk/blob/b188be60134d409b61259546bcf69c731d2b0b7c/docs/channel.md>
+Evidence:  
+- Send message: <https://open.feishu.cn/document/uAjLw4CM/ukTMukTMukTM/reference/im-v1/message/create>  
+- Send content and the `md` tag: <https://open.feishu.cn/document/uAjLw4CM/ukTMukTMukTM/im-v1/message/create_json>  
+- Reply: <https://open.feishu.cn/document/uAjLw4CM/ukTMukTMukTM/reference/im-v1/message/reply>  
+- Reaction create: <https://open.feishu.cn/document/uAjLw4CM/ukTMukTMukTM/reference/im-v1/message-reaction/create>  
+- Receive content structure: <https://open.feishu.cn/document/uAjLw4CM/ukTMukTMukTM/im-v1/message/events/message_content>  
+- node-sdk notes on reaction constraints: <https://github.com/larksuite/node-sdk/blob/b188be60134d409b61259546bcf69c731d2b0b7c/docs/channel.md>
 
-**【建议】** 第一版：`post`+`md` 发文本（把整段 Markdown 塞进一个 `md` 节点），超长（例如 >4000 字符，客户端约 4096 会分屏）按段落切分成多条，首条用 reply；表情做 unicode→emoji_type 映射表，并缓存自己 create 得到的 `reaction_id` 以支持 remove；附件全部后置。
+**[Suggestion]** First version: send text with `post`+`md` (put the whole Markdown into one `md` node), split overlong content (for example >4000 characters; the client splits screens at about 4096) by paragraph into several messages with the first one using reply; reactions use a unicode→emoji_type mapping table, and cache the `reaction_id` obtained from our own create to support remove; attachments all deferred.
 
-### 2.10 其他限制与坑（都会影响实现）
+### 2.10 Other limits and pitfalls (all affect the implementation)
 
-- **3 秒事件处理上限**：入口 handler 必须快速返回，重活丢队列（现有 `session-ingress-queue` 正好是这个形状）。
-- **幂等键是 message_id**（§2.5）。
-- **bot 自己的消息不会回推**（`im:message.group_msg` 文档措辞）。必须 synthetic self-event。
-- **消息编辑不可见**（§2.6）。
-- **发送限频 5 QPS/群且群内机器人共享**：tool loop 连续发言会被限流；这正是“有界工具执行”要解决的问题，飞书线只负责把错误如实返回。
-- **长连接集群模式**：不能多开；与 CLI event consumer 互斥（§2.1/§3.6）。
-- **撤回事件没有操作人 ID**：canonical delete 事件的 `actor` 留空。
-- **typing 指示**：未找到飞书机器人可用的 typing API（【待验证】），需要把 `sendTypingAction` 对飞书置 false 或 no-op。
-- **提示注入**：CLI/MCP 官方 README 明确建议不要把这类机器人拉群；说明群消息内容属于不可信输入，后续接 CLI/MCP 工具时要按不可信数据处理。
+- **3-second event processing cap**: the entry handler must return quickly and push heavy work to a queue (the existing `session-ingress-queue` has exactly this shape).
+- **The idempotency key is message_id** (§2.5).
+- **The bot's own messages are not pushed back** (wording of the `im:message.group_msg` docs). A synthetic self-event is required.
+- **Message edits are invisible** (§2.6).
+- **Send rate limit 5 QPS/group, shared by the bots in the group**: consecutive speech in a tool loop will be rate-limited; this is exactly the problem "bounded tool execution" solves, and the Feishu line only has to return the error faithfully.
+- **Long-connection cluster mode**: cannot be opened multiple times; mutually exclusive with the CLI event consumer (§2.1/§3.6).
+- **The recall event has no operator ID**: the `actor` of the canonical delete event is left empty.
+- **Typing indicator**: no typing API usable by a Feishu bot was found ([to verify]), so `sendTypingAction` must be set to false or no-op for Feishu.
+- **Prompt injection**: the CLI/MCP official README explicitly advises against adding such bots to groups; this shows group message content is untrusted input, and when CLI/MCP tools are connected later they must be treated as untrusted data.
 
-### 2.11 待验证清单（实现前/联调时必须实测）
+### 2.11 Checklist to verify (must be tested before implementation / during integration)
 
-1. 目标租户能否获批 `im:message.group_msg`（敏感权限，可能需管理员审批）；外部群是否可用。
-2. 接收事件里 `sender_id` 实际返回哪些 ID（open_id 之外是否有 user_id/union_id）。
-3. 消息**编辑**是否完全不会重推；`update_time` 在接收事件里的实际表现。
-4. 机器人**入群前**历史消息能否读到；入群后历史读到的起点。
-5. 机器人被 @ 时 `mentions[].id.open_id` 是否恒等于 `/bot/v3/info` 的 open_id（三个参考实现都依赖这一点）。
-6. `@all` 消息是否会在 `im:message.group_msg` 下推送给机器人。
-7. 长连接是否支持 `card.action.trigger` 回调（官方两处口径不一致）。
-8. 飞书是否存在机器人 typing/正在输入能力。
-9. 昵称解析 scope 的确切名称与是否需要审批（`contact:user.base:readonly` 与 `contact:contact.base:readonly` 在 AstrBot 的示例里同时出现）。
-10. 5 QPS/群限流下，模型连续多条发言的实际表现与错误码。
-
----
-
-## 3. 参考实现核对（仓库存在性 + 真实源码 + commit）
-
-**只读参考，不复制代码。** 各仓库许可：nanobot MIT、hermes-agent MIT、node-sdk MIT、larksuite/cli MIT、lark-openapi-mcp MIT；**AstrBot 为 AGPL-3.0**，其代码不得复制进本仓库，只能作为行为参考。
-
-### 3.1 HKUDS/nanobot（MIT，Python）
-
-仓库存在、默认分支 `main`、commit `67248790c76b150af39dab5026608ee2c449b0d3`。
-
-- 适配器主文件（2905 行）：<https://github.com/HKUDS/nanobot/blob/67248790c76b150af39dab5026608ee2c449b0d3/nanobot/channels/feishu/runtime.py>
-  - 收消息与门控：`#L2633` `_on_message`：`sender_type == "bot"` 直接丢；群聊未 @ 机器人直接丢；`message_id` 内存 LRU 去重；收到即回一个 `THUMBSUP` 表情；`parent_id` 拉父消息正文；用 `root_id/message_id` 做 topic 会话隔离（可配置 `topic_isolation`）。
-  - 发送：`#L2076` `_send_message_sync`（`im.v1.message.create`）、`#L1944` `_reply_message_sync`（`im.v1.message.reply`，支持 `reply_in_thread`）。
-  - @ 解析：`#L1201` `_resolve_mentions` 把 `@_user_N` 替换成 `@姓名 (open_id, user id: xxx)`。
-  - WS 运行：<https://github.com/HKUDS/nanobot/blob/67248790c76b150af39dab5026608ee2c449b0d3/nanobot/channels/feishu/websocket.py>（把 `lark_oapi` 的模块级 loop 补丁到自己的工作线程，避免多实例冲突）。
-  - 配置形状：<https://github.com/HKUDS/nanobot/blob/67248790c76b150af39dab5026608ee2c449b0d3/nanobot/channels/feishu/config.py>（`group_policy: open|mention`、`reply_to_message`、`streaming`、`topic_isolation`）。
-  - 测试目录有 20+ 个飞书测试（mention、post、reply、reaction、table split、media filename security 等）：<https://github.com/HKUDS/nanobot/tree/67248790c76b150af39dab5026608ee2c449b0d3/nanobot/channels/feishu/tests>
-- 值得借鉴：**测试组织方式**（每个飞书消息类型/交互一个测试文件）和 `topic_isolation` 的取舍记录。
-- 不建议照搬：内存去重不跨重启；把 topic 作为独立 session 的策略与 LarkBot“单上下文”方向相反。
-
-### 3.2 NousResearch/hermes-agent（MIT，Python）
-
-仓库存在、默认分支 `main`、commit `53bec2a311979ad6f77580ba491eca261ab988e0`。
-
-- 适配器主文件（4493 行）：<https://github.com/NousResearch/hermes-agent/blob/53bec2a311979ad6f77580ba491eca261ab988e0/plugins/platforms/feishu/adapter.py>
-  - 文件头身份模型注释（open_id/user_id/union_id）：`#L1`
-  - bot 判定：`#L347` `_is_bot_sender`（接收文档说 `{user, bot}`，实现防御性接受 `app`）
-  - 准入策略：`#L3382` `_admit`：self-echo 过滤、bot 消息策略（none/mentions/all）、群策略（open/allowlist/blacklist/admin_only/disabled）、require_mention；@all 视为提到自己。
-  - **持久化去重**：`#L3550`/`#L3580`/`#L3592`，`message_id → 时间戳` 落盘 JSON + TTL + 容量上限。
-  - 事件处理与线程：`#L2016` `_on_message_event`（loop 未就绪时排队重放）、`#L2615` `_process_inbound_message`（`thread_id` 才当话题，`root_id` 不能当话题，否则普通引用会被误判为话题——这是他们踩过的坑）。
-  - 出站：`#L1652` `send`（markdown → post，失败降级纯文本）、`#L1704` `edit_message`、`#L1732` `delete_message`、`#L1983` `get_chat_info`。
-  - WS 生命周期：`#L1493` `connect`、`#L1545` `disconnect`、`#L1574` `_teardown_ws_thread`（**先发 WebSocket CLOSE 帧再拆线程**，否则服务端继续把事件路由到已死连接；“同一 app_id 本地只允许一个实例”的 app lock）。
-- 权限文档（scopes 表）：<https://github.com/NousResearch/hermes-agent/blob/53bec2a311979ad6f77580ba491eca261ab988e0/website/docs/user-guide/messaging/feishu.md#L62>
-- 插件清单：<https://github.com/NousResearch/hermes-agent/blob/53bec2a311979ad6f77580ba491eca261ab988e0/plugins/platforms/feishu/plugin.yaml>
-- 值得借鉴：**身份 ID 优先级（open_id > user_id > name）**、**持久化去重**、**CLOSE 帧/单实例锁**、`thread_id` 与 `root_id` 的区分、markdown→post 的降级策略。
-- 不建议照搬：整套 gateway/多 profile/multiplex 架构，远超 LarkBot 当前需要。
-
-### 3.3 AstrBotDevs/AstrBot（AGPL-3.0，仅行为参考）
-
-仓库存在、默认分支 `master`、commit `9441402872f65fffc35685b0ead5bd3337033cb2`。
-
-- `<https://github.com/AstrBotDevs/AstrBot/blob/9441402872f65fffc35685b0ead5bd3337033cb2/astrbot/core/platform/sources/lark/lark_adapter.py>`：`register_p2_im_message_receive_v1` + `lark.ws.Client`；`convert_msg`（`#L586`）；`_build_reply_from_parent_id`（`#L407`）；`event_id` 去重（`#L517`，与官方 message_id 建议相悖）；通讯录昵称解析与缓存。
-- 文档：<https://github.com/AstrBotDevs/AstrBot/blob/9441402872f65fffc35685b0ead5bd3337033cb2/docs/zh/platform/lark.md>（权限、socket/webhook、一键权限链接）。
-- 已确认的官方口径：`im:message.group_msg` 是“接收群聊中所有消息”的关键权限。
-
-### 3.4 larksuite/node-sdk（官方，MIT）
-
-仓库存在、默认分支 `main`、commit `b188be60134d409b61259546bcf69c731d2b0b7c`、版本 1.76.0。
-
-- 长连接与事件：`WSClient` + `EventDispatcher`；README `#L557`。
-- 高层 `Channel`：`channel/channel.ts`、`channel/safety/dedup-cache.ts`（两层去重：内存 LRU + 可注入长效 Cache）、`channel/normalize/**`（消息类型 → markdown + XML 标签的统一表示）、`channel/outbound/**`（markdown→post、分片、重试、错误分类）、`docs/channel.md`。
-- **关键：`normalize` / `normalizeCardAction` / `normalizeReaction` / `normalizeBotAdded` / `normalizeComment` 在包根导出**（`channel/index.ts` 的 `export { normalize, ... } from './normalize'`），文档也写明“For webhook-mode integrations, historical event replay, or custom event pipelines, the internal normalizers are exported as well”。这意味着可以**只借解析器、不要 Channel 的调度语义**。
-- `NormalizedMessage` 字段（`docs/channel.md`）：`messageId`/`chatId`/`chatType`/`senderId`（open_id 优先，回退 user_id/union_id）/`content`（markdown + XML 媒体标签）/`resources`/`mentions`（不含 bot 自己）/`mentionAll`/`mentionedBot`/`rootId`/`threadId`/`replyToMessageId`/`createTime`。
-- 发送侧 `SendOptions` 支持 `replyTo`、`replyInThread`、结构化 `mentions`；内置 `target_revoked` 自动去掉 replyTo 重发、`format_error` 降级纯文本；`LarkChannelError` 分类 `rate_limited`/`permission_denied` 等。
-- 依赖很轻：axios、lodash.*、protobufjs、qs、ws。
-
-### 3.5 其他可参考的官方材料
-
-- 服务端 SDK 文档：<https://open.feishu.cn/document/ukTMukTMukTM/uETO1YjLxkTN24SM5UjN>
-- 事件列表入口：<https://open.feishu.cn/document/ukTMukTMukTM/uYDNxYjL2QTM24iN0EjN/event-list>
-
-### 3.6 官方 CLI（larksuite/cli）与 MCP
-
-**larksuite/cli**：仓库存在、`main`、commit `017b19a793ad71794a02887ede04757f3d82e10d`、MIT、Go、200+ 命令 + 26 个 Skill。
-
-- 实时事件：`lark-cli event consume <EventKey>` 走长连接，stdout 输出 NDJSON；有 ready marker、`--max-events`/`--timeout`、退出码约定；一次只能消费一个 EventKey。<https://github.com/larksuite/cli/blob/017b19a793ad71794a02887ede04757f3d82e10d/skills/lark-event/SKILL.md>
-- IM 事件目录（12 个，含 reaction/chat.member，**不含 recalled**）：<https://github.com/larksuite/cli/blob/017b19a793ad71794a02887ede04757f3d82e10d/skills/lark-event/references/lark-event-im.md>
-- 消息/成员操作：`+chat-messages-list`、`+messages-search`、`+messages-mget`、`+chat-members-list`、`+messages-reply`、`+messages-edit`、`reactions create/list/delete`、`+messages-resources-download` 等：<https://github.com/larksuite/cli/blob/017b19a793ad71794a02887ede04757f3d82e10d/affordance/im.md>
-- `--as user|bot` 切换 user_access_token / tenant_access_token；`lark-cli auth login --recommend`。
-- README 安全警告：建议把 CLI 接入的机器人当私人助手，**不要拉进群聊**、不要让其他用户与之交互，以免权限被滥用。<https://github.com/larksuite/cli/blob/017b19a793ad71794a02887ede04757f3d82e10d/README.zh.md>
-
-**lark-openapi-mcp**：仓库存在、`main`、commit `21920354ec6e3966b52e89152620c5085e496b55`、2025-08 后无更新。<https://github.com/larksuite/lark-openapi-mcp>
-
-**【建议】** CLI/MCP 的定位：
-
-1. **不作为接入 ingress**：它与自建 WS 客户端争抢同一 app 的集群推送（§2.1），且多一个常驻进程/bus daemon。
-2. **后续作为工具候选**：查历史、查群成员、读文档等交给 `lark-cli`（子进程 + `--as bot` + 最小 scope），或 MCP。但必须按“不可信输出”处理，且不能用于权限判定（维护者权限仍来自本地可信配置）。
-3. 若要试 CLI ingress，只能用**同一个 app 的同一 WS 连接策略**：要么全部交给 CLI（由它 `event consume` 再喂给本进程），要么全部自己接；不能两者并存。
+1. Whether the target tenant can get `im:message.group_msg` approved (a sensitive permission, may need administrator approval); whether external groups work.
+2. Which IDs `sender_id` in receive events actually returns (whether there is a user_id/union_id besides open_id).
+3. Whether message **edits** are really never re-pushed; the actual behaviour of `update_time` in receive events.
+4. Whether history from **before the bot joined** can be read; the starting point of history readable after joining.
+5. Whether `mentions[].id.open_id` always equals the open_id of `/bot/v3/info` when the bot is @-mentioned (all three reference implementations depend on this).
+6. Whether `@all` messages are pushed to the bot under `im:message.group_msg`.
+7. Whether the long connection supports the `card.action.trigger` callback (the two official statements disagree).
+8. Whether Feishu has a bot typing/is-typing capability.
+9. The exact name of the display-name resolution scope and whether it needs approval (`contact:user.base:readonly` and `contact:contact.base:readonly` both appear in AstrBot's examples).
+10. The actual behaviour and error codes when the model sends several messages in a row under the 5 QPS/group limit.
 
 ---
 
-## 4. 推荐的最小增量方案
+## 3. Check of the reference implementations (repository existence + real source + commit)
 
-### 4.1 设计原则
+**Read-only references, no code copied.** Licenses of each repository: nanobot MIT, hermes-agent MIT, node-sdk MIT, larksuite/cli MIT, lark-openapi-mcp MIT; **AstrBot is AGPL-3.0**, so its code must not be copied into this repository and can only serve as a behaviour reference.
 
-- 不建通用插件框架，不为“以后可能接的平台”抽象；只为**当前两个实现**（Telegram、Feishu）抽出必要接缝。
-- 复用既有 canonical 类型、Projection、Rendering、Driver、DB、compaction、scheduler。
-- 第一版能用官方 SDK 解决的都不自己写；能用 DB 幂等解决的都不加新表。
+### 3.1 HKUDS/nanobot (MIT, Python)
 
-### 4.2 模块划分（新增）
+Repository exists, default branch `main`, commit `67248790c76b150af39dab5026608ee2c449b0d3`.
+
+- Main adapter file (2905 lines): <https://github.com/HKUDS/nanobot/blob/67248790c76b150af39dab5026608ee2c449b0d3/nanobot/channels/feishu/runtime.py>
+  - Receiving and gating: `#L2633` `_on_message`: `sender_type == "bot"` is dropped directly; an unmentioned group message is dropped directly; in-memory LRU dedup by `message_id`; a `THUMBSUP` reaction is sent immediately on receipt; the parent message body is fetched with `parent_id`; topic session isolation uses `root_id/message_id` (configurable `topic_isolation`).
+  - Sending: `#L2076` `_send_message_sync` (`im.v1.message.create`), `#L1944` `_reply_message_sync` (`im.v1.message.reply`, supports `reply_in_thread`).
+  - @ parsing: `#L1201` `_resolve_mentions` replaces `@_user_N` with `@name (open_id, user id: xxx)`.
+  - WS operation: <https://github.com/HKUDS/nanobot/blob/67248790c76b150af39dab5026608ee2c449b0d3/nanobot/channels/feishu/websocket.py> (patches the module-level loop of `lark_oapi` onto its own worker thread to avoid multi-instance conflicts).
+  - Config shape: <https://github.com/HKUDS/nanobot/blob/67248790c76b150af39dab5026608ee2c449b0d3/nanobot/channels/feishu/config.py> (`group_policy: open|mention`, `reply_to_message`, `streaming`, `topic_isolation`).
+  - The test directory has 20+ Feishu tests (mention, post, reply, reaction, table split, media filename security, etc.): <https://github.com/HKUDS/nanobot/tree/67248790c76b150af39dab5026608ee2c449b0d3/nanobot/channels/feishu/tests>
+- Worth borrowing: **the test organization** (one test file per Feishu message type/interaction) and the recorded trade-offs of `topic_isolation`.
+- Not recommended to copy: in-memory dedup does not survive restarts; the strategy of making a topic an independent session runs opposite to LuckyBot's "single context" direction.
+
+### 3.2 NousResearch/hermes-agent (MIT, Python)
+
+Repository exists, default branch `main`, commit `53bec2a311979ad6f77580ba491eca261ab988e0`.
+
+- Main adapter file (4493 lines): <https://github.com/NousResearch/hermes-agent/blob/53bec2a311979ad6f77580ba491eca261ab988e0/plugins/platforms/feishu/adapter.py>
+  - Identity-model comment at the file head (open_id/user_id/union_id): `#L1`
+  - Bot detection: `#L347` `_is_bot_sender` (the receive docs say `{user, bot}`, and the implementation defensively also accepts `app`)
+  - Admission policy: `#L3382` `_admit`: self-echo filtering, bot message policy (none/mentions/all), group policy (open/allowlist/blacklist/admin_only/disabled), require_mention; @all counts as mentioning itself.
+  - **Persistent dedup**: `#L3550`/`#L3580`/`#L3592`, `message_id → timestamp` persisted to JSON + TTL + capacity cap.
+  - Event handling and threads: `#L2016` `_on_message_event` (queues for replay when the loop is not ready), `#L2615` `_process_inbound_message` (only `thread_id` counts as a topic and `root_id` must not, otherwise an ordinary quote is misjudged as a topic — a pitfall they hit).
+  - Outbound: `#L1652` `send` (markdown → post, degrading to plain text on failure), `#L1704` `edit_message`, `#L1732` `delete_message`, `#L1983` `get_chat_info`.
+  - WS lifecycle: `#L1493` `connect`, `#L1545` `disconnect`, `#L1574` `_teardown_ws_thread` (**send the WebSocket CLOSE frame first and then tear down the thread**, otherwise the server keeps routing events to the dead connection; an app lock "only one instance per app_id locally").
+- Permissions doc (scopes table): <https://github.com/NousResearch/hermes-agent/blob/53bec2a311979ad6f77580ba491eca261ab988e0/website/docs/user-guide/messaging/feishu.md#L62>
+- Plugin manifest: <https://github.com/NousResearch/hermes-agent/blob/53bec2a311979ad6f77580ba491eca261ab988e0/plugins/platforms/feishu/plugin.yaml>
+- Worth borrowing: **identity ID priority (open_id > user_id > name)**, **persistent dedup**, **CLOSE frame / single-instance lock**, the distinction between `thread_id` and `root_id`, the markdown→post degradation strategy.
+- Not recommended to copy: the whole gateway / multi-profile / multiplex architecture, far beyond what LuckyBot currently needs.
+
+### 3.3 AstrBotDevs/AstrBot (AGPL-3.0, behaviour reference only)
+
+Repository exists, default branch `master`, commit `9441402872f65fffc35685b0ead5bd3337033cb2`.
+
+- `<https://github.com/AstrBotDevs/AstrBot/blob/9441402872f65fffc35685b0ead5bd3337033cb2/astrbot/core/platform/sources/lark/lark_adapter.py>`: `register_p2_im_message_receive_v1` + `lark.ws.Client`; `convert_msg` (`#L586`); `_build_reply_from_parent_id` (`#L407`); `event_id` dedup (`#L517`, contrary to the official message_id advice); contacts display-name resolution and caching.
+- Docs: <https://github.com/AstrBotDevs/AstrBot/blob/9441402872f65fffc35685b0ead5bd3337033cb2/docs/zh/platform/lark.md> (permissions, socket/webhook, one-click permission link).
+- Confirmed official position: `im:message.group_msg` is the key permission for "receiving all messages in group chats".
+
+### 3.4 larksuite/node-sdk (official, MIT)
+
+Repository exists, default branch `main`, commit `b188be60134d409b61259546bcf69c731d2b0b7c`, version 1.76.0.
+
+- Long connection and events: `WSClient` + `EventDispatcher`; README `#L557`.
+- The high-level `Channel`: `channel/channel.ts`, `channel/safety/dedup-cache.ts` (two-layer dedup: in-memory LRU + an injectable long-lived Cache), `channel/normalize/**` (a unified representation of message type → markdown + XML tags), `channel/outbound/**` (markdown→post, chunking, retry, error classification), `docs/channel.md`.
+- **Key: `normalize` / `normalizeCardAction` / `normalizeReaction` / `normalizeBotAdded` / `normalizeComment` are exported at the package root** (`export { normalize, ... } from './normalize'` in `channel/index.ts`), and the docs also say "For webhook-mode integrations, historical event replay, or custom event pipelines, the internal normalizers are exported as well". This means we can **borrow only the parser without the Channel's scheduling semantics**.
+- `NormalizedMessage` fields (`docs/channel.md`): `messageId`/`chatId`/`chatType`/`senderId` (open_id first, falling back to user_id/union_id)/`content` (markdown + XML media tags)/`resources`/`mentions` (excluding the bot itself)/`mentionAll`/`mentionedBot`/`rootId`/`threadId`/`replyToMessageId`/`createTime`.
+- The send-side `SendOptions` supports `replyTo`, `replyInThread` and structured `mentions`; built-in `target_revoked` automatically drops replyTo and resends, `format_error` degrades to plain text; `LarkChannelError` classifies `rate_limited`/`permission_denied` etc.
+- Very light dependencies: axios, lodash.*, protobufjs, qs, ws.
+
+### 3.5 Other official material worth consulting
+
+- Server SDK docs: <https://open.feishu.cn/document/ukTMukTMukTM/uETO1YjLxkTN24SM5UjN>
+- Event list entry: <https://open.feishu.cn/document/ukTMukTMukTM/uYDNxYjL2QTM24iN0EjN/event-list>
+
+### 3.6 The official CLI (larksuite/cli) and MCP
+
+**larksuite/cli**: repository exists, `main`, commit `017b19a793ad71794a02887ede04757f3d82e10d`, MIT, Go, 200+ commands + 26 Skills.
+
+- Real-time events: `lark-cli event consume <EventKey>` goes over the long connection and prints NDJSON on stdout; it has a ready marker, `--max-events`/`--timeout` and exit-code conventions; only one EventKey can be consumed at a time. <https://github.com/larksuite/cli/blob/017b19a793ad71794a02887ede04757f3d82e10d/skills/lark-event/SKILL.md>
+- IM event catalogue (12, including reaction/chat.member, **not including recalled**): <https://github.com/larksuite/cli/blob/017b19a793ad71794a02887ede04757f3d82e10d/skills/lark-event/references/lark-event-im.md>
+- Message/member operations: `+chat-messages-list`, `+messages-search`, `+messages-mget`, `+chat-members-list`, `+messages-reply`, `+messages-edit`, `reactions create/list/delete`, `+messages-resources-download` and so on: <https://github.com/larksuite/cli/blob/017b19a793ad71794a02887ede04757f3d82e10d/affordance/im.md>
+- `--as user|bot` switches between user_access_token / tenant_access_token; `lark-cli auth login --recommend`.
+- README security warning: it advises treating a CLI-connected bot as a personal assistant, **not adding it to group chats** and not letting other users interact with it, to avoid abuse of permissions. <https://github.com/larksuite/cli/blob/017b19a793ad71794a02887ede04757f3d82e10d/README.zh.md>
+
+**lark-openapi-mcp**: repository exists, `main`, commit `21920354ec6e3966b52e89152620c5085e496b55`, no updates since 2025-08. <https://github.com/larksuite/lark-openapi-mcp>
+
+**[Suggestion]** The positioning of CLI/MCP:
+
+1. **Not as the ingress**: it competes with the self-built WS client for the cluster push of the same app (§2.1), and adds a resident process/bus daemon.
+2. **Later as a tool candidate**: looking up history, looking up group members, reading documents etc. left to `lark-cli` (subprocess + `--as bot` + minimal scope), or MCP. But it must be treated as "untrusted output", and cannot be used for permission decisions (maintainer permission still comes from the local trusted configuration).
+3. If a CLI ingress is to be tried, only with **one WS connection strategy for the same app**: either everything goes to the CLI (it runs `event consume` and feeds this process), or everything is connected by ourselves; the two cannot coexist.
+
+---
+
+## 4. Recommended minimal incremental plan
+
+### 4.1 Design principles
+
+- Build no generic plugin framework and abstract nothing for "platforms that may be connected later"; extract the necessary seams only for the **current two implementations** (Telegram, Feishu).
+- Reuse the existing canonical types, Projection, Rendering, Driver, DB, compaction, scheduler.
+- In the first version, whatever the official SDK can solve is not written ourselves; whatever DB idempotency can solve gets no new table.
+
+### 4.2 Module layout (new)
 
 ```text
 src/
-├── im/                        # 平台无关、从 telegram/ 抽出（纯移动，逻辑不变）
-│   ├── event-sink.ts          # 原 telegram/event-sink.ts
-│   └── session-ingress-queue.ts  # 原 telegram/session-ingress-queue.ts
-├── feishu/                    # 新增，唯一允许写飞书平台细节的地方
-│   ├── client.ts              # WSClient + Client + bot 身份 + start/stop + 断线重连
-│   ├── adaptation.ts          # 原始事件 -> CanonicalIMEvent（含 delete/service）
-│   ├── content.ts             # normalize() 结果/原始 content -> ContentNode[]；parent 引用解析
-│   ├── live-handlers.ts       # dedup 闸门 + persist + publish（对照 telegram/live-handlers.ts）
-│   ├── user-names.ts          # open_id -> 昵称缓存（通讯录 API，失败软降级）
-│   ├── reactions.ts           # unicode <-> emoji_type 映射 + reaction_id 缓存
-│   ├── markdown.ts            # Markdown -> post/md 包装 + 分片
+├── im/                        # platform-independent, extracted from telegram/ (pure move, logic unchanged)
+│   ├── event-sink.ts          # formerly telegram/event-sink.ts
+│   └── session-ingress-queue.ts  # formerly telegram/session-ingress-queue.ts
+├── feishu/                    # new; the only place allowed to hold Feishu platform details
+│   ├── client.ts              # WSClient + Client + bot identity + start/stop + reconnect after disconnect
+│   ├── adaptation.ts          # raw event -> CanonicalIMEvent (including delete/service)
+│   ├── content.ts             # normalize() result / raw content -> ContentNode[]; parent quote resolution
+│   ├── live-handlers.ts       # dedup gate + persist + publish (cf. telegram/live-handlers.ts)
+│   ├── user-names.ts          # open_id -> display-name cache (contacts API, soft degradation on failure)
+│   ├── reactions.ts           # unicode <-> emoji_type mapping + reaction_id cache
+│   ├── markdown.ts            # Markdown -> post/md wrapping + chunking
 │   └── driver-hooks.ts        # sendMessage/reaction/download/typing(no-op) + synthetic self-event
-└── driver/platform.ts         # 最小接缝接口（见 §5.2）
+└── driver/platform.ts         # minimal seam interface (see §5.2)
 ```
 
-### 4.3 接入方式（第一版逐项）
+### 4.3 How to connect (first version, item by item)
 
-| 能力 | 做法 | 依赖权限 |
+| Capability | Approach | Permission needed |
 | --- | --- | --- |
-| 收群消息（含旁听） | `WSClient` + `EventDispatcher` 订 `im.message.receive_v1`；chat id 在 `chats` 白名单内才进 pipeline | `im:message.group_msg`（+群@权限） |
-| 收单聊 | 同上，`chat_type == 'p2p'` | `im:message.p2p_msg:readonly` |
-| 文本解析 | `normalize()` 拿 `content`（markdown + XML 标签）+ `mentions`/`mentionAll`；再转 `ContentNode[]` | — |
-| 发送者身份 | `open_id` 为主键；`isBot = sender_type !== 'user'`；昵称经通讯录缓存解析，失败回退 ID | 昵称：`contact:user.base:readonly` |
-| @ / 提到我 | `mentions[].id.open_id == botOpenId`（botOpenId 来自 `/bot/v3/info`）；`@_all` 记为 mention-all | — |
-| 引用 | `parent_id` → `replyToMessageId`；正文优先 IC 快照，缺失时按需 `GET /im/v1/messages/:id`（带缓存，失败软降级） | `im:message`/`im:message:readonly` |
-| 话题 | `thread_id` 作为可选字段透传渲染，不拆会话 | — |
-| 撤回 | `im.message.recalled_v1` → canonical `delete` | `im:message`/`im:message:readonly` |
-| 服务事件 | `im.chat.member.user.added_v1` → members_joined；`...deleted_v1` → member_left；`im.chat.updated_v1` 的 `after_change.name` → chat_renamed；`im.chat.member.bot.added_v1` 用于拿群名/记录入群 | 订阅对应事件 |
-| 去重 | 内存 LRU + `events` 表存在性检查（跨重启） | — |
-| 断线补洞 | 重连/启动时按本地最后时间戳调历史接口回查，逐条走同一去重流程 | `im:message.group_msg`（群） |
-| 发送 | `post`+`md`；>4000 字符按段落分片；首条 reply；带 `uuid` | `im:message:send_as_bot` |
-| 表情 | unicode→emoji_type 映射；create 后缓存 reaction_id 支持 remove | `im:message.reactions:write_only` |
-| typing | no-op；飞书 chat 配置 `sendTypingAction: false` | — |
-| 自消息 | 每次发送成功后注入 `isSelfSent=true` canonical 事件（含真实 `create_time`） | — |
-| 媒体 | **第一版不做**：附件不 hydrate、`download_file`/`read_image` 对飞书返回明确不支持错误 | 后期 `im:resource` |
+| Receive group messages (including listening in) | `WSClient` + `EventDispatcher` subscribing to `im.message.receive_v1`; a chat id enters the pipeline only if it is in the `chats` whitelist | `im:message.group_msg` (+ group @ permission) |
+| Receive private chats | Same, `chat_type == 'p2p'` | `im:message.p2p_msg:readonly` |
+| Text parsing | `normalize()` gives `content` (markdown + XML tags) + `mentions`/`mentionAll`; then convert to `ContentNode[]` | — |
+| Sender identity | `open_id` as the primary key; `isBot = sender_type !== 'user'`; display name resolved through the contacts cache, falling back to the ID on failure | Names: `contact:user.base:readonly` |
+| @ / mentions me | `mentions[].id.open_id == botOpenId` (botOpenId from `/bot/v3/info`); `@_all` is recorded as mention-all | — |
+| Quotes | `parent_id` → `replyToMessageId`; body from the IC snapshot first, and when missing fetched on demand with `GET /im/v1/messages/:id` (cached, soft degradation on failure) | `im:message`/`im:message:readonly` |
+| Topics | `thread_id` passed through as an optional field for rendering, no conversation splitting | — |
+| Recalls | `im.message.recalled_v1` → canonical `delete` | `im:message`/`im:message:readonly` |
+| Service events | `im.chat.member.user.added_v1` → members_joined; `...deleted_v1` → member_left; `after_change.name` of `im.chat.updated_v1` → chat_renamed; `im.chat.member.bot.added_v1` used to get the group name / record joining | Subscribe to the corresponding events |
+| Dedup | In-memory LRU + an existence check in the `events` table (across restarts) | — |
+| Gap filling after disconnect | On reconnect/startup query back through the history endpoint from the last local timestamp, each entry going through the same dedup flow | `im:message.group_msg` (groups) |
+| Sending | `post`+`md`; >4000 characters split by paragraph; first one is a reply; with a `uuid` | `im:message:send_as_bot` |
+| Reactions | unicode→emoji_type mapping; cache reaction_id after create to support remove | `im:message.reactions:write_only` |
+| Typing | no-op; Feishu chat config `sendTypingAction: false` | — |
+| Own messages | After each successful send inject an `isSelfSent=true` canonical event (with the real `create_time`) | — |
+| Media | **Not in the first version**: attachments are not hydrated, `download_file`/`read_image` return an explicit not-supported error for Feishu | Later `im:resource` |
 
-### 4.4 数据库：第一版可以零迁移
+### 4.4 Database: the first version can have zero migrations
 
-**【建议】** 飞书事件只写 `events`（canonical，`message_id` 已是 text），不写 Telegram 专用的 `messages` 表：
+**[Suggestion]** Feishu events are written only to `events` (canonical; `message_id` is already text) and not to the Telegram-specific `messages` table:
 
-- `messageExists` 的飞书实现查 `events`（现有 `loadLatestMessageContent` 已示范按 `chatId + messageId` 查 `events`）。
-- 附件读取从 `events.attachments`（canonical JSON）取；第一版媒体关闭，返回空/失败即可。
-- 因此**不需要**把 `messages.message_id integer` 改成 text，**不需要**新 Drizzle 迁移。Telegram 行为不变。
-- 代价：飞书没有平台原始 JSON 归档、没有 `messages.deletedAt`（撤回只体现在 canonical IC/events）。若后续要做媒体，再决定是迁移 `messages` 还是给飞书建独立附件表；届时按项目规范补迁移。
+- The Feishu implementation of `messageExists` queries `events` (the existing `loadLatestMessageContent` already demonstrates querying `events` by `chatId + messageId`).
+- Attachment reads come from `events.attachments` (canonical JSON); in the first version media is off, so returning empty/failure is enough.
+- So there is **no need** to change `messages.message_id integer` into text and **no need** for a new Drizzle migration. Telegram behaviour is unchanged.
+- Cost: Feishu has no raw platform JSON archive and no `messages.deletedAt` (a recall appears only in the canonical IC/events). If media is done later, decide then whether to migrate `messages` or give Feishu a separate attachment table; the migration is then added per the project conventions.
 
-### 4.5 明确不做（YAGNI）
+### 4.5 Explicitly not done (YAGNI)
 
-- 通用平台/插件框架、平台注册中心、第二种消息 ID 抽象层。
-- 按 thread 拆上下文、多会话管理。
-- 卡片、流式输出、流式打字机效果（`cardkit` 相关权限）。
-- 媒体上传下载、自定义表情、图片 alt text。
-- 消息编辑同步、ban_spammer、消息删除（只有撤回）。
-- CLI/MCP 接入、Jev/Mem0 接入（见 §5.3）。
-- 历史全量导入；只做“断线补洞”。
+- A generic platform/plugin framework, a platform registry, a second message-ID abstraction layer.
+- Splitting context by thread, multi-conversation management.
+- Cards, streaming output, streaming typewriter effects (`cardkit`-related permissions).
+- Media upload/download, custom emoji, image alt text.
+- Message edit sync, ban_spammer, message deletion (recall only).
+- CLI/MCP integration, Jev/Mem0 integration (see §5.3).
+- Full history import; only "gap filling after disconnects".
 
 ---
 
-## 5. 与 driver 行为开发线并行：文件所有权与最小接缝
+## 5. Parallel to the driver behaviour line: file ownership and the minimal seam
 
-### 5.1 文件所有权建议
+### 5.1 File ownership suggestion
 
-| 归属 | 文件 | 规则 |
+| Owner | Files | Rule |
 | --- | --- | --- |
-| **飞书线独占** | `src/feishu/**`（新增）、`src/container/registrars/feishu.ts`（新增）、`docs/feishu-integration-research.md` | 可自由改 |
-| **driver 行为线独占** | `src/driver/wakeup.ts`、`runner.ts`、`turn-loop.ts`、`context.ts`、`compaction*.ts`、`scheduler.ts`、`tools/end-turn.ts`、`tools/decide.ts`、`prompts/**` | 飞书线不碰 |
-| **共享、需一次“接缝提交”锁定** | `src/driver/index.ts`、`src/driver/primary-tools.ts`、`src/driver/platform.ts`（新增）、`src/driver/tools/{send-message,react,attachment-downloader,download-file,read-image}.ts`、`src/db/persistence.ts`、`src/db/schema.ts`、`src/container/{tokens.ts,index.ts,registrars/{driver,pipeline,core,media}.ts}`、`src/startup/index.ts`、`src/config/config.ts`、`src/pipeline.ts` | 先合接缝，再各自动工；后续改这些文件要互相同步 |
-| **纯移动（一次提交）** | `src/telegram/event-sink.ts` → `src/im/event-sink.ts`；`src/telegram/session-ingress-queue.ts` → `src/im/session-ingress-queue.ts` | 只改 import/路径，不改逻辑，方便 diff 审查 |
+| **Feishu line exclusive** | `src/feishu/**` (new), `src/container/registrars/feishu.ts` (new), `docs/feishu-integration-research.md` | Free to change |
+| **Driver behaviour line exclusive** | `src/driver/wakeup.ts`, `runner.ts`, `turn-loop.ts`, `context.ts`, `compaction*.ts`, `scheduler.ts`, `tools/end-turn.ts`, `tools/decide.ts`, `prompts/**` | Feishu line does not touch |
+| **Shared, to be locked by one "seam commit"** | `src/driver/index.ts`, `src/driver/primary-tools.ts`, `src/driver/platform.ts` (new), `src/driver/tools/{send-message,react,attachment-downloader,download-file,read-image}.ts`, `src/db/persistence.ts`, `src/db/schema.ts`, `src/container/{tokens.ts,index.ts,registrars/{driver,pipeline,core,media}.ts}`, `src/startup/index.ts`, `src/config/config.ts`, `src/pipeline.ts` | Merge the seam first, then each starts work; later changes to these files must be synced with each other |
+| **Pure move (one commit)** | `src/telegram/event-sink.ts` → `src/im/event-sink.ts`; `src/telegram/session-ingress-queue.ts` → `src/im/session-ingress-queue.ts` | Change only imports/paths, not logic, to ease diff review |
 
-接缝提交的验收标准：`pnpm typecheck && pnpm lint && pnpm test:run && pnpm build` 全绿，Telegram 行为不变（现有测试 + characterization 测试保护）。
+Acceptance criterion of the seam commit: `pnpm typecheck && pnpm lint && pnpm test:run && pnpm build` all green, Telegram behaviour unchanged (protected by the existing tests + characterization tests).
 
-### 5.2 最小接口接缝（建议形态）
+### 5.2 Minimal interface seam (suggested form)
 
-把现在散落在 `createDriver` deps 里的平台形状收敛成一个接口，消息 ID 一律 `string`：
+Converge the platform shape now scattered in the `createDriver` deps into one interface, with message IDs always `string`:
 
 ```ts
-// src/driver/platform.ts —— 飞书线提供，driver 线评审
+// src/driver/platform.ts — provided by the Feishu line, reviewed by the driver line
 import type { CanonicalAttachment } from '../adaptation/types';
 import type { BanSpammerResult } from './platform-types';
 
@@ -482,13 +482,13 @@ export interface PlatformAttachmentRef {
   type: string;
   fileName?: string;
   mimeType?: string;
-  fileKey?: string;          // 飞书：message_resource 下载所需
+  fileKey?: string;          // Feishu: needed for message_resource download
   resourceType?: 'image' | 'file';
 }
 
 export interface DriverPlatform {
-  name: 'telegram' | 'feishu';       // 供 wakeup 的 currentChannel 使用
-  botUserId: string;                 // pipeline 的 botUserId / isMyself / mentionsMe
+  name: 'telegram' | 'feishu';       // for currentChannel in wakeup
+  botUserId: string;                 // pipeline's botUserId / isMyself / mentionsMe
   start(): Promise<void>;
   stop(): Promise<void>;
 
@@ -505,159 +505,159 @@ export interface DriverPlatform {
   downloadMessageMedia(chatId: string, messageId: string): Promise<Buffer | undefined>;
   messageExists(chatId: string, messageId: string): boolean;
 
-  // 平台可选能力：飞书第一版不实现；调用方按 undefined 处理
+  // Optional platform capabilities: not implemented by Feishu in the first version; callers treat as undefined
   banSpammer?: (chatId: string, messageId: string) => Promise<BanSpammerResult>;
   getCustomEmojiInfo?: (ids: string[]) => Promise<CustomEmojiMedia[]>;
 }
 ```
 
-Driver 侧只改“形状”不改语义：
+The Driver side changes only the "shape", not the semantics:
 
-- `createDriver(config, deps)` 里的六个平台回调替换为 `platform: DriverPlatform`；其余 persistence/model/backgroundTask 依赖不动。
-- `primary-tools` 的 `sendMessage` 不再 `Number(replyTo)`，直接透传字符串；`send-message.ts`/`react.ts` 的 `messageExists(messageId: string)`。
-- `attachment-downloader` 的 `file-id` 解析改成 `lastIndexOf(':')` + 保留字符串 messageId。
-- Telegram 平台实现内部保留 `Number(...)`/`serverToTdLibMessageId` 转换，行为不变。
-- `DriverConfig` 增加 `platformName`（或从 `platform.name` 取），`wakeup.ts` 不再硬编码 `'telegram'`。这行改动请由 driver 线在它的 prompt 改动里顺带落，或由飞书线在接缝提交中只改这一处并请 driver 线 rebase。
+- The six platform callbacks in `createDriver(config, deps)` are replaced with `platform: DriverPlatform`; the other persistence/model/backgroundTask dependencies are untouched.
+- `sendMessage` in `primary-tools` no longer does `Number(replyTo)` and passes the string through; `messageExists(messageId: string)` in `send-message.ts`/`react.ts`.
+- The `file-id` parsing in `attachment-downloader` changes to `lastIndexOf(':')` + keeping the messageId as a string.
+- The Telegram platform implementation keeps the `Number(...)`/`serverToTdLibMessageId` conversion internally, behaviour unchanged.
+- `DriverConfig` gains `platformName` (or takes it from `platform.name`), and `wakeup.ts` no longer hardcodes `'telegram'`. Please have the driver line land this one-line change together with its prompt changes, or have the Feishu line change only this spot in the seam commit and ask the driver line to rebase.
 
-`DriverPlatform` 的 `start/stop` 只负责平台客户端生命周期；ingress 的 live handler 与 post-startup 仍由容器/startup 组装（`PlatformRuntime` token 可选，若不想动 startup 太多，也可以只在 `registerDriver` 里按配置二选一 —— 见下）。
+The `start/stop` of `DriverPlatform` is only responsible for the platform client lifecycle; the ingress live handler and post-startup are still assembled by the container/startup (the `PlatformRuntime` token is optional; if you do not want to change startup much, you can also just pick one of two by configuration in `registerDriver` — see below).
 
-**更懒的替代方案**（若不希望动 startup）：保留 Telegram 的 token 名，新增 `TOKENS.FEISHU_*`，在 `registerDriver` 里 `const platform = config.feishu ? feishuPlatform() : telegramPlatform()`。代价是 startup 仍要处理平台 start/stop/liveHandlers/postStartup，耦合更深。推荐仍取 `PlatformRuntime` 形态，一次改干净。
+**A lazier alternative** (if you do not want to touch startup): keep the Telegram token names, add `TOKENS.FEISHU_*`, and in `registerDriver` do `const platform = config.feishu ? feishuPlatform() : telegramPlatform()`. The cost is that startup still has to handle platform start/stop/liveHandlers/postStartup, so the coupling is deeper. The `PlatformRuntime` form is still recommended, to clean it up in one go.
 
-### 5.3 与记忆/工具预算线的接口依赖（只指出，不实现）
+### 5.3 Interface dependencies on the memory / tool-budget lines (pointed out only, not implemented)
 
-- **Probe 替换（Jev）**：只影响 `src/driver/wakeup.ts` 的 probe 调用与 `probe.model` 配置形状（`decide` 工具的 schema 与 `probe_responses_v2` 落库）。飞书线不依赖 probe 实现，只要求“probe 之后可能沉默”与“@ 是强信号但不是强制回复”最终一致；飞书侧的 `mentionsMe` 已在 RC 段上提供，可直接作为信号输入。
-- **有界工具执行**：`maxSteps: Infinity` 与 `checkInterrupt`（新消息延长当前轮）都在 driver 线；飞书线**不得**依赖“新消息延长当前轮”，并应保证 `send_message` 的返回格式（`{ok:true,message_id}`）不变，否则 tool loop 判定会坏。飞书 5 QPS/群 的限流真实存在，工具预算落定前，飞书 hook 只能如实抛出 `rate_limited`。
-- **逐人记忆（Mem0/Nowledge/文件）**：按架构约束，外部记忆只能经 late-binding prompt 或工具结果进入，不得改 IC。接口点：`renderLateBindingPrompt` 的参数、`chats.<id>.systemFiles`、以及稳定的 `CanonicalUser.id`（=飞书 open_id）。`events.sender` 已含 `id/displayName/username/isBot`，如需 `union_id`/`user_id` 需要在 `CanonicalUser` 上扩展字段（建议第一版就预留 JSON 字段，避免二次迁移）。
-- **维护者鉴权**：来自可信配置（`maintainers.yaml`），不得从聊天内容/记忆推断；飞书线只负责提供稳定 open_id。
+- **Probe replacement (Jev)**: affects only the probe call in `src/driver/wakeup.ts` and the shape of the `probe.model` config (the schema of the `decide` tool and the `probe_responses_v2` persistence). The Feishu line does not depend on the probe implementation and only requires that "silence is possible after the probe" and "an @-mention is a strong signal but not a forced reply" end up consistent; Feishu's `mentionsMe` is already provided on the RC segment and can be used directly as a signal input.
+- **Bounded tool execution**: `maxSteps: Infinity` and `checkInterrupt` (a new message extending the current turn) are both in the driver line; the Feishu line **must not** depend on "a new message extends the current turn", and should keep the return format of `send_message` (`{ok:true,message_id}`) unchanged, otherwise the tool loop's judgement breaks. The Feishu 5 QPS/group rate limit is real, and until the tool budget is settled the Feishu hook can only throw `rate_limited` faithfully.
+- **Per-person memory (Mem0/Nowledge/files)**: by the architecture constraints, external memory can enter only through the late-binding prompt or tool results and must not change the IC. Interface points: the parameters of `renderLateBindingPrompt`, `chats.<id>.systemFiles`, and the stable `CanonicalUser.id` (= Feishu open_id). `events.sender` already contains `id/displayName/username/isBot`; if `union_id`/`user_id` are needed, fields must be extended on `CanonicalUser` (suggest reserving a JSON field in the first version to avoid a second migration).
+- **Maintainer authentication**: comes from trusted configuration (`maintainers.yaml`), and must not be inferred from chat content/memory; the Feishu line is only responsible for supplying a stable open_id.
 
 ---
 
-## 6. 验收测试与需要的用户配置
+## 6. Acceptance tests and the user configuration needed
 
-### 6.1 单元/回放测试（CI，不连网）
+### 6.1 Unit/replay tests (CI, offline)
 
-1. **适配回放**：录制的原始事件 JSON fixture（text 带 @、post 带 md、引用、话题、撤回、成员加入、改名、bot 入群）→ `CanonicalIMEvent` 快照测试；断言 `messageId`/`chatId` 都是字符串、mention userId = open_id、`replyToMessageId = parent_id`。
-2. **去重**：同一 `message_id` 事件投递两次（模拟 3 秒重推/重启重放），断言 `events` 只新增一行、pipeline 只收到一次。
-3. **ID 接缝**：`send_message.reply_to = "om_x"`、`react.message_id = "om_x"`、`file-id = "om_x:0"` 都能正确解析；非法 ID 被拒绝且不调用平台 API。
-4. **发送渲染**：Markdown → post/md JSON 的包装与分片；`uuid` 存在且每次不同；synthetic self-event 的 `isSelfSent=true` 且不唤醒 Driver。
-5. **撤回**：`recalled_v1` → canonical delete → 渲染 `<message deleted="true"/>`。
-6. **回归保护**：Telegram 适配/管理器的现有测试全部保持通过（接缝提交的核心验收）。
-7. **SDK 兼容**：对 `normalize()` 输出做一次“锁定行为”的测试；升级 `@larksuiteoapi/node-sdk` 时若解析结构变了会失败。
+1. **Adaptation replay**: recorded raw event JSON fixtures (text with @, post with md, quote, topic, recall, member join, rename, bot joining) → `CanonicalIMEvent` snapshot tests; assert that `messageId`/`chatId` are both strings, mention userId = open_id, and `replyToMessageId = parent_id`.
+2. **Dedup**: deliver the event with the same `message_id` twice (simulating a 3-second re-push / restart replay), and assert that `events` gains only one row and the pipeline receives it only once.
+3. **ID seam**: `send_message.reply_to = "om_x"`, `react.message_id = "om_x"` and `file-id = "om_x:0"` all parse correctly; an illegal ID is rejected without calling the platform API.
+4. **Send rendering**: the Markdown → post/md JSON wrapping and chunking; the `uuid` exists and differs each time; the synthetic self-event has `isSelfSent=true` and does not wake the Driver.
+5. **Recall**: `recalled_v1` → canonical delete → renders `<message deleted="true"/>`.
+6. **Regression protection**: all existing Telegram adaptation/manager tests keep passing (the core acceptance of the seam commit).
+7. **SDK compatibility**: one "behaviour-locking" test on the `normalize()` output; if the parse structure changes when `@larksuiteoapi/node-sdk` is upgraded, it fails.
 
-### 6.2 手工联调清单（需要真实租户）
+### 6.2 Manual integration checklist (needs a real tenant)
 
-1. 群里普通发言（无 @）能被归档并进入 IC/RC；`im:message.group_msg` 未开时只能收到 @ 消息（预期行为）。
-2. 机器人能看到自己的发言（synthetic self-event），且 probe 前不会因为看不到自己而重复回应。
-3. @ 机器人、@all、回复机器人、话题内回复，四种情况下的 `mentionsMe`/`repliesToMe` 正确。
-4. 重启进程：历史 RC 正确重建、无重复事件、去重仍生效（重启后重推同一 message_id 不重复）。
-5. 断线 30 秒后重连：补洞能补齐期间消息（若开启），且不重复。
-6. 撤回一条群消息：IC 中该消息变 deleted，模型可见。
-7. 连续发送超过 5 QPS/群：错误被如实返回，不出现静默丢消息。
-8. 长消息（>4000 字符）：分片、顺序正确、reply 只在首条。
-9. 表情：加/删各一次；删的是自己加的那个。
-10. 长连接与 CLI `event consume` **不同时**运行。
+1. Ordinary messages in a group (without @) are archived and enter the IC/RC; with `im:message.group_msg` not enabled only @ messages can be received (expected behaviour).
+2. The bot can see its own messages (synthetic self-event), and before the probe it will not respond repeatedly because it cannot see itself.
+3. `mentionsMe`/`repliesToMe` are correct in four cases: @-mention of the bot, @all, reply to the bot, reply inside a topic.
+4. Restart the process: the historical RC is rebuilt correctly, there are no duplicate events, and dedup still works (re-pushing the same message_id after restart does not duplicate).
+5. Reconnect after a 30-second disconnect: gap filling fills in the messages in between (if enabled), without duplicates.
+6. Recall a group message: that message becomes deleted in the IC and the model can see it.
+7. Send more than 5 QPS/group continuously: the error is returned faithfully, with no silent message loss.
+8. Long message (>4000 characters): chunking, correct order, reply only on the first one.
+9. Reactions: add once, delete once; the one deleted is the one it added.
+10. The long connection and the CLI `event consume` are **not** run at the same time.
 
-### 6.3 需要用户（应用管理员）配置的权限与开关
+### 6.3 Permissions and switches the user (app administrator) must configure
 
-**权限（在开发者后台“权限管理”中申请）**：
+**Permissions (apply for them in "Permission management" of the developer console)**:
 
-- 收消息：`im:message`（群全量消息另需 **`im:message.group_msg`**，敏感权限）；群 @：`im:message.group_at_msg:readonly`；单聊：`im:message.p2p_msg:readonly`。
-- 发消息：`im:message:send_as_bot`（或 `im:message`）。
-- 撤回事件：`im:message` 或 `im:message:readonly`。
-- 表情：`im:message.reactions:write_only`；收表情事件另需 `im:message.reactions:read`。
-- 附件：`im:resource`（第一版不启用，可暂不申请）。
-- 群信息/成员：`im:chat`（或 `im:chat:readonly` / `im:chat.members:read`）。
-- 昵称解析：`contact:user.base:readonly`（**待验证**确切名称；`user_id` 另需 `contact:user.employee_id:readonly`）。
+- Receiving messages: `im:message` (all group messages additionally need **`im:message.group_msg`**, a sensitive permission); group @: `im:message.group_at_msg:readonly`; private chat: `im:message.p2p_msg:readonly`.
+- Sending messages: `im:message:send_as_bot` (or `im:message`).
+- Recall events: `im:message` or `im:message:readonly`.
+- Reactions: `im:message.reactions:write_only`; receiving reaction events additionally needs `im:message.reactions:read`.
+- Attachments: `im:resource` (not enabled in the first version; can be left unapplied for now).
+- Chat info/members: `im:chat` (or `im:chat:readonly` / `im:chat.members:read`).
+- Display-name resolution: `contact:user.base:readonly` (**to verify** the exact name; `user_id` additionally needs `contact:user.employee_id:readonly`).
 
-**事件订阅（“事件与回调”页面）**：
+**Event subscriptions ("Events and callbacks" page)**:
 
-- `im.message.receive_v1`（必需）
+- `im.message.receive_v1` (required)
 - `im.message.recalled_v1`
-- `im.chat.member.user.added_v1`、`im.chat.member.user.deleted_v1`
-- `im.chat.updated_v1`、`im.chat.member.bot.added_v1`（拿群名/入群）
-- 可选：`im.message.reaction.created_v1` / `im.message.reaction.deleted_v1`
+- `im.chat.member.user.added_v1`, `im.chat.member.user.deleted_v1`
+- `im.chat.updated_v1`, `im.chat.member.bot.added_v1` (to get the group name / joining)
+- Optional: `im.message.reaction.created_v1` / `im.message.reaction.deleted_v1`
 
-**其他**：
+**Other**:
 
-- 开启机器人能力，事件订阅方式选**长连接**（必须在本地客户端在线时保存成功）。
-- **发布应用版本**（权限与事件变更需发版；企业自建应用可能需管理员审批）；配置**可用范围**（用户不在可用范围内的单聊会失败 230013）。
-- 配置 `config.yaml` 的 `feishu.appId/appSecret/domain`，以及 `chats."oc_xxx"`。
-- 建议把该 app **只给 LarkBot 进程**使用（长连接集群模式 + 单实例）。
+- Enable the bot capability, and choose **long connection** as the event subscription method (it can be saved successfully only while the local client is online).
+- **Publish an app version** (permission and event changes need a release; an enterprise self-built app may need administrator approval); configure the **availability scope** (private chats with users outside the availability scope fail with 230013).
+- Configure `feishu.appId/appSecret/domain` in `config.yaml`, and `chats."oc_xxx"`.
+- Suggest using that app **only for the LuckyBot process** (long-connection cluster mode + single instance).
 
-### 6.4 建议的落地顺序（每步可独立验收）
+### 6.4 Suggested landing order (each step independently verifiable)
 
-1. **接缝提交**：`DriverPlatform` 接口 + string ID + `im/` 移动 + Telegram 适配；不接飞书，测试全绿。
-2. **配置与启动**：`feishu` 配置段、`PlatformRuntime`、`tdl.configure` 惰性化；飞书空实现也能 `pnpm start` 到“客户端就绪”日志。
-3. **只读 ingress**：收消息 → 落库 → pipeline → 日志/RC 可见；补齐 dedup 与撤回/服务事件。
-4. **出站**：send（text 先跑通，再做 post/md）→ synthetic self-event → 完整回合闭环。
-5. **补洞 + 联调清单**：断线补洞、@/引用/话题、长消息、限流错误。
-6. **提示词与频道名**：与 driver/人设线一起把 `currentChannel` 与 Telegram 专属措辞改掉。
+1. **Seam commit**: the `DriverPlatform` interface + string IDs + the `im/` move + Telegram adaptation; Feishu is not connected, tests all green.
+2. **Configuration and startup**: the `feishu` config section, `PlatformRuntime`, lazy `tdl.configure`; even an empty Feishu implementation can `pnpm start` to the "client ready" log.
+3. **Read-only ingress**: receive messages → persist → pipeline → visible in the log/RC; complete dedup and the recall/service events.
+4. **Outbound**: send (text first, then post/md) → synthetic self-event → a complete turn loop.
+5. **Gap filling + integration checklist**: gap filling after disconnects, @/quote/topic, long messages, rate-limit errors.
+6. **Prompts and channel name**: change `currentChannel` and the Telegram-specific wording together with the driver/persona line.
 
 ---
 
-## 7. 风险与未验证项
+## 7. Risks and unverified items
 
-| 风险 | 影响 | 缓解 |
+| Risk | Impact | Mitigation |
 | --- | --- | --- |
-| `im:message.group_msg` 批不下来（敏感权限/管理员审批） | 机器人只能收到 @ 消息，无法旁听 | 先按 @ 模式跑通；把“旁听”作为显式配置能力，缺权限时日志提示 |
-| 长连接集群模式 + 单实例锁 | 多开/CLI 并跑会随机丢事件 | 文档化“一个 app 只跑一个客户端”；实现启动时的单实例检测（参考 Hermes app lock） |
-| 3 秒处理超时 | 触发重推、被限流 | ingress 立即返回、重活丢队列；去重按 message_id |
-| 编辑不可见 | IC 与群内实际内容可能不一致 | 文档写明；后续用 `updated`/`update_time` 在拉取路径补 |
-| 昵称解析 scope/审批 | 模型只看到 `ou_xxx` | 通讯录解析 + 缓存 + 失败回退；也可先用群成员列表补名 |
-| 无限工具循环 + 5 QPS/群限流 | 回复慢、限流报错、刷屏（与 Hermes 的痛点同源） | 由 driver 行为线实现有界预算；飞书 hook 只透传错误 |
-| 历史可见范围未验证 | 用户误以为能看到全部历史 | 不做“全量历史导入”的承诺；补洞只承诺“在线期间 + 断线窗口” |
-| `normalize()` 是较新 API | SDK 升级可能改行为 | 锁版本 + 行为锁定测试 |
-| AstrBot 是 AGPL | 复制代码会引入许可问题 | 只参考行为，不复制代码；本项目上游也尚无公开 LICENSE，需遵守 Menci 的授权范围 |
+| `im:message.group_msg` cannot be approved (sensitive permission / administrator approval) | The bot can only receive @ messages and cannot listen in | First get the @ mode working; make "listening in" an explicit configurable capability, with a log hint when the permission is missing |
+| Long-connection cluster mode + single-instance lock | Running several instances / running with the CLI randomly loses events | Document "one app runs only one client"; implement single-instance detection at startup (see the Hermes app lock) |
+| 3-second processing timeout | Triggers re-pushes and rate limiting | The ingress returns immediately and pushes heavy work to a queue; dedup by message_id |
+| Edits invisible | The IC and the actual content in the group may be inconsistent | State it in the docs; later mark it on the fetch path with `updated`/`update_time` |
+| Display-name resolution scope/approval | The model sees only `ou_xxx` | Contacts resolution + cache + fallback on failure; the group member list can also fill in names first |
+| Unbounded tool loop + 5 QPS/group rate limit | Slow replies, rate-limit errors, flooding (same source as the Hermes pain point) | The driver behaviour line implements the bounded budget; the Feishu hook only passes errors through |
+| History visibility scope not verified | Users mistakenly think all history is visible | Make no promise of "full history import"; gap filling promises only "the online period + the disconnect window" |
+| `normalize()` is a fairly new API | An SDK upgrade may change behaviour | Pin the version + a behaviour-locking test |
+| AstrBot is AGPL | Copying code would bring license problems | Reference behaviour only, copy no code; at the time of writing this project's upstream also had no public LICENSE yet and Menci's authorization scope had to be respected (superseded: upstream adopted MIT on 2026-10-17) |
 
 ---
 
-## 8. 证据链接汇总
+## 8. Summary of evidence links
 
-**官方文档（`open.feishu.cn`，URL 后加 `.md` 可取原文）**
+**Official documentation (`open.feishu.cn`; append `.md` to the URL to get the original)**
 
-- 接收消息事件（权限、message_id 去重）：<https://open.feishu.cn/document/uAjLw4CM/ukTMukTMukTM/reference/im-v1/message/events/receive>
-- 长连接模式（3 秒、50 连接、集群模式、仅自建应用）：<https://open.feishu.cn/document/uAjLw4CM/ukTMukTMukTM/event-subscription-guide/long-connection-mode>
-- 用户身份概述（open_id/user_id/union_id）：<https://open.feishu.cn/document/home/user-identity-introduction/introduction>
-- 消息管理概述（root/parent/thread/updated）：<https://open.feishu.cn/document/uAjLw4CM/ukTMukTMukTM/reference/im-v1/message/intro>
-- 接收消息内容结构：<https://open.feishu.cn/document/uAjLw4CM/ukTMukTMukTM/im-v1/message/events/message_content>
-- 撤回消息事件：<https://open.feishu.cn/document/uAjLw4CM/ukTMukTMukTM/reference/im-v1/message/events/recalled>
-- 发送消息（限频、uuid、消息类型）：<https://open.feishu.cn/document/uAjLw4CM/ukTMukTMukTM/reference/im-v1/message/create>
-- 发送内容与 Markdown（`post`+`md`）：<https://open.feishu.cn/document/uAjLw4CM/ukTMukTMukTM/im-v1/message/create_json>
-- 回复消息：<https://open.feishu.cn/document/uAjLw4CM/ukTMukTMukTM/reference/im-v1/message/reply>
-- 撤回消息接口：<https://open.feishu.cn/document/uAjLw4CM/ukTMukTMukTM/reference/im-v1/message/delete>
-- 获取历史消息：<https://open.feishu.cn/document/uAjLw4CM/ukTMukTMukTM/reference/im-v1/message/list>
-- 获取指定消息：<https://open.feishu.cn/document/uAjLw4CM/ukTMukTMukTM/reference/im-v1/message/get>
-- 表情回复创建：<https://open.feishu.cn/document/uAjLw4CM/ukTMukTMukTM/reference/im-v1/message-reaction/create>
-- 表情回复事件：<https://open.feishu.cn/document/uAjLw4CM/ukTMukTMukTM/reference/im-v1/message-reaction/events/created>
-- 群成员列表：<https://open.feishu.cn/document/uAjLw4CM/ukTMukTMukTM/reference/im-v1/chat-members/get>
-- 群信息：<https://open.feishu.cn/document/uAjLw4CM/ukTMukTMukTM/reference/im-v1/chat/get>
-- 消息资源下载：<https://open.feishu.cn/document/uAjLw4CM/ukTMukTMukTM/reference/im-v1/message-resource/get>
+- Receive-message event (permissions, message_id dedup): <https://open.feishu.cn/document/uAjLw4CM/ukTMukTMukTM/reference/im-v1/message/events/receive>
+- Long-connection mode (3 seconds, 50 connections, cluster mode, self-built apps only): <https://open.feishu.cn/document/uAjLw4CM/ukTMukTMukTM/event-subscription-guide/long-connection-mode>
+- User identity overview (open_id/user_id/union_id): <https://open.feishu.cn/document/home/user-identity-introduction/introduction>
+- Message management overview (root/parent/thread/updated): <https://open.feishu.cn/document/uAjLw4CM/ukTMukTMukTM/reference/im-v1/message/intro>
+- Receive-message content structure: <https://open.feishu.cn/document/uAjLw4CM/ukTMukTMukTM/im-v1/message/events/message_content>
+- Recall-message event: <https://open.feishu.cn/document/uAjLw4CM/ukTMukTMukTM/reference/im-v1/message/events/recalled>
+- Send message (rate limit, uuid, message types): <https://open.feishu.cn/document/uAjLw4CM/ukTMukTMukTM/reference/im-v1/message/create>
+- Send content and Markdown (`post`+`md`): <https://open.feishu.cn/document/uAjLw4CM/ukTMukTMukTM/im-v1/message/create_json>
+- Reply to message: <https://open.feishu.cn/document/uAjLw4CM/ukTMukTMukTM/reference/im-v1/message/reply>
+- Recall-message endpoint: <https://open.feishu.cn/document/uAjLw4CM/ukTMukTMukTM/reference/im-v1/message/delete>
+- Get history messages: <https://open.feishu.cn/document/uAjLw4CM/ukTMukTMukTM/reference/im-v1/message/list>
+- Get a specified message: <https://open.feishu.cn/document/uAjLw4CM/ukTMukTMukTM/reference/im-v1/message/get>
+- Create reaction: <https://open.feishu.cn/document/uAjLw4CM/ukTMukTMukTM/reference/im-v1/message-reaction/create>
+- Reaction events: <https://open.feishu.cn/document/uAjLw4CM/ukTMukTMukTM/reference/im-v1/message-reaction/events/created>
+- Chat member list: <https://open.feishu.cn/document/uAjLw4CM/ukTMukTMukTM/reference/im-v1/chat-members/get>
+- Chat info: <https://open.feishu.cn/document/uAjLw4CM/ukTMukTMukTM/reference/im-v1/chat/get>
+- Message resource download: <https://open.feishu.cn/document/uAjLw4CM/ukTMukTMukTM/reference/im-v1/message-resource/get>
 
-**官方 SDK / CLI**
+**Official SDK / CLI**
 
-- node-sdk（MIT，`b188be60134d409b61259546bcf69c731d2b0b7c`，1.76.0）：<https://github.com/larksuite/node-sdk>
-  - `channel/channel.ts`：<https://github.com/larksuite/node-sdk/blob/b188be60134d409b61259546bcf69c731d2b0b7c/channel/channel.ts>
-  - `channel/safety/dedup-cache.ts`：<https://github.com/larksuite/node-sdk/blob/b188be60134d409b61259546bcf69c731d2b0b7c/channel/safety/dedup-cache.ts>
-  - `docs/channel.md`：<https://github.com/larksuite/node-sdk/blob/b188be60134d409b61259546bcf69c731d2b0b7c/docs/channel.md>
-  - `code-gen/events-template.ts`（`im.message.recalled_v1` 在 `#L4309`，`im.message.receive_v1` 在 `#L4426`）：<https://github.com/larksuite/node-sdk/blob/b188be60134d409b61259546bcf69c731d2b0b7c/code-gen/events-template.ts>
-  - `channel/normalize`：<https://github.com/larksuite/node-sdk/tree/b188be60134d409b61259546bcf69c731d2b0b7c/channel/normalize>
-- larksuite/cli（MIT，`017b19a793ad71794a02887ede04757f3d82e10d`）：<https://github.com/larksuite/cli>
-  - `skills/lark-event/SKILL.md`、`skills/lark-event/references/lark-event-im.md`、`skills/lark-im/SKILL.md`、`affordance/im.md`
-  - README 安全警告：<https://github.com/larksuite/cli/blob/017b19a793ad71794a02887ede04757f3d82e10d/README.zh.md>
-- lark-openapi-mcp：<https://github.com/larksuite/lark-openapi-mcp>（`21920354ec6e3966b52e89152620c5085e496b55`）
+- node-sdk (MIT, `b188be60134d409b61259546bcf69c731d2b0b7c`, 1.76.0): <https://github.com/larksuite/node-sdk>
+  - `channel/channel.ts`: <https://github.com/larksuite/node-sdk/blob/b188be60134d409b61259546bcf69c731d2b0b7c/channel/channel.ts>
+  - `channel/safety/dedup-cache.ts`: <https://github.com/larksuite/node-sdk/blob/b188be60134d409b61259546bcf69c731d2b0b7c/channel/safety/dedup-cache.ts>
+  - `docs/channel.md`: <https://github.com/larksuite/node-sdk/blob/b188be60134d409b61259546bcf69c731d2b0b7c/docs/channel.md>
+  - `code-gen/events-template.ts` (`im.message.recalled_v1` at `#L4309`, `im.message.receive_v1` at `#L4426`): <https://github.com/larksuite/node-sdk/blob/b188be60134d409b61259546bcf69c731d2b0b7c/code-gen/events-template.ts>
+  - `channel/normalize`: <https://github.com/larksuite/node-sdk/tree/b188be60134d409b61259546bcf69c731d2b0b7c/channel/normalize>
+- larksuite/cli (MIT, `017b19a793ad71794a02887ede04757f3d82e10d`): <https://github.com/larksuite/cli>
+  - `skills/lark-event/SKILL.md`, `skills/lark-event/references/lark-event-im.md`, `skills/lark-im/SKILL.md`, `affordance/im.md`
+  - README security warning: <https://github.com/larksuite/cli/blob/017b19a793ad71794a02887ede04757f3d82e10d/README.zh.md>
+- lark-openapi-mcp: <https://github.com/larksuite/lark-openapi-mcp> (`21920354ec6e3966b52e89152620c5085e496b55`)
 
-**第三方参考实现**
+**Third-party reference implementations**
 
-- nanobot（MIT，`67248790c76b150af39dab5026608ee2c449b0d3`）：<https://github.com/HKUDS/nanobot/tree/67248790c76b150af39dab5026608ee2c449b0d3/nanobot/channels/feishu>
-- hermes-agent（MIT，`53bec2a311979ad6f77580ba491eca261ab988e0`）：<https://github.com/NousResearch/hermes-agent/blob/53bec2a311979ad6f77580ba491eca261ab988e0/plugins/platforms/feishu/adapter.py>
-- AstrBot（**AGPL-3.0，只读参考**，`9441402872f65fffc35685b0ead5bd3337033cb2`）：<https://github.com/AstrBotDevs/AstrBot/tree/9441402872f65fffc35685b0ead5bd3337033cb2/astrbot/core/platform/sources/lark>
+- nanobot (MIT, `67248790c76b150af39dab5026608ee2c449b0d3`): <https://github.com/HKUDS/nanobot/tree/67248790c76b150af39dab5026608ee2c449b0d3/nanobot/channels/feishu>
+- hermes-agent (MIT, `53bec2a311979ad6f77580ba491eca261ab988e0`): <https://github.com/NousResearch/hermes-agent/blob/53bec2a311979ad6f77580ba491eca261ab988e0/plugins/platforms/feishu/adapter.py>
+- AstrBot (**AGPL-3.0, read-only reference**, `9441402872f65fffc35685b0ead5bd3337033cb2`): <https://github.com/AstrBotDevs/AstrBot/tree/9441402872f65fffc35685b0ead5bd3337033cb2/astrbot/core/platform/sources/lark>
 
-**本仓库代码锚点**
+**Code anchors in this repository**
 
-- 平台→canonical：`src/telegram/adaptation.ts`、`src/telegram/message/tdlib.ts`
-- 入口与发布：`src/telegram/manager.ts`、`src/telegram/live-handlers.ts`、`src/telegram/event-sink.ts`
-- ID 数字耦合：`src/telegram/message/types.ts`（`messageId: number`）、`src/db/schema.ts`（`messages.messageId integer`）、`src/db/persistence.ts`（`loadMessageAttachments`/`messageExists`）
-- Driver 接缝：`src/driver/index.ts`、`src/driver/primary-tools.ts`、`src/driver/tools/send-message.ts`、`react.ts`、`attachment-downloader.ts`
-- 出站与自事件：`src/telegram/driver-hooks.ts`、`src/telegram/bot.ts`
-- 启动与 DI：`src/startup/index.ts`、`src/container/**`
-- 提示词频道名：`src/driver/wakeup.ts`、`prompts/system.velin.md`、`prompts/late-binding.velin.md`
+- Platform→canonical: `src/telegram/adaptation.ts`, `src/telegram/message/tdlib.ts`
+- Ingress and publication: `src/telegram/manager.ts`, `src/telegram/live-handlers.ts`, `src/telegram/event-sink.ts`
+- Numeric ID coupling: `src/telegram/message/types.ts` (`messageId: number`), `src/db/schema.ts` (`messages.messageId integer`), `src/db/persistence.ts` (`loadMessageAttachments`/`messageExists`)
+- Driver seam: `src/driver/index.ts`, `src/driver/primary-tools.ts`, `src/driver/tools/send-message.ts`, `react.ts`, `attachment-downloader.ts`
+- Outbound and self-event: `src/telegram/driver-hooks.ts`, `src/telegram/bot.ts`
+- Startup and DI: `src/startup/index.ts`, `src/container/**`
+- Prompt channel name: `src/driver/wakeup.ts`, `prompts/system.velin.md`, `prompts/late-binding.velin.md`

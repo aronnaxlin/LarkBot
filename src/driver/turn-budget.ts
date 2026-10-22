@@ -7,6 +7,7 @@ export const DEFAULT_TURN_BUDGET: TurnBudget = {
   maxParticipationCalls: 3,
   deadlineMs: 15_000,
   minModelCallMs: 2_000,
+  wrapUpReserveMs: 6_000,
 };
 
 // Probe has its own bound, separate from the primary deadline: on the first

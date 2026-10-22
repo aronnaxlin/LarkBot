@@ -63,6 +63,10 @@ export interface TurnBudget {
   // A model call starts only with at least this much deadline left; its HTTP
   // timeout is the remaining time, capped by the endpoint's timeoutSec.
   minModelCallMs: number;
+  // With less than this much deadline left, the next step is the
+  // participation-only wrap-up, so a turn that spent its time on tools still
+  // gets one chance to answer instead of closing silently at the deadline.
+  wrapUpReserveMs?: number;
 }
 
 // A probe that activated primary for a context whose primary then failed

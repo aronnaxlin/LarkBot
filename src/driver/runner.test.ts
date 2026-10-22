@@ -518,6 +518,37 @@ describe('runner turn budget', () => {
       expect(checkInterrupt).not.toHaveBeenCalled();
     });
 
+    it('turns the next step into the wrap-up when the remaining time drops below the reserve', async () => {
+      const { send, react, endTurn } = participationTools();
+      const slow = workTool('bash', vi.fn(() => {
+        vi.setSystemTime(Date.now() + 6_000);
+        return { content: 'slow', requiresFollowUp: true };
+      }));
+      mockCallLlm
+        .mockResolvedValueOnce({ entries: toolCallEntries({ callId: 'b', name: 'bash' }), usage: makeUsage() })
+        .mockResolvedValueOnce({ entries: toolCallEntries({ callId: 's', name: 'send_message', args: '{"text":"hi"}' }), usage: makeUsage() });
+      const onStepComplete = vi.fn(async (_entries: ConversationEntry[]) => {});
+
+      await createTestRunner().runStepLoop({
+        chatId: 'reserve',
+        entries: initialEntries,
+        system: 'system',
+        tools: [send.tool, react.tool, slow.tool, endTurn.tool],
+        budget: { ...DEFAULT_TURN_BUDGET, deadlineMs: 10_000, wrapUpReserveMs: 5_000 },
+        deadlineAtMs: Date.now() + 10_000,
+        onStepComplete,
+        checkInterrupt: () => false,
+        log: logger,
+      });
+
+      // 4 s left: below the 5 s reserve but enough for a model call.
+      expect(mockCallLlm).toHaveBeenCalledTimes(2);
+      expect(schemaNames(0)).toEqual(['send_message', 'react', 'bash', 'end_turn']);
+      expect(schemaNames(1)).toEqual(['send_message', 'react', 'end_turn']);
+      expect(send.execute).toHaveBeenCalledOnce();
+      expect(persistedResults(onStepComplete, 1).every(result => !result.requiresFollowUp)).toBe(true);
+    });
+
     it('skips later side effects in the same batch after a running tool exceeds the deadline', async () => {
       const { send, react, endTurn } = participationTools();
       const slow = workTool('bash', vi.fn(() => {

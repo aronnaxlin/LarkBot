@@ -89,6 +89,15 @@ describe('platform configuration', () => {
       oc_synthetic: { primary: { turnBudget: { deadlineMs: 2000 } } },
     })).toThrow('must be greater than minModelCallMs');
     expect(() => fixture({ platform: 'feishu', feishu: FEISHU }, {
+      oc_synthetic: { primary: { turnBudget: { deadlineMs: 5000 } } },
+    })).toThrow('wrapUpReserveMs (6000) must be 0 or between');
+    expect(() => fixture({ platform: 'feishu', feishu: FEISHU }, {
+      oc_synthetic: { primary: { turnBudget: { wrapUpReserveMs: 1000 } } },
+    })).toThrow('wrapUpReserveMs');
+    expect(resolveChatConfig(fixture({ platform: 'feishu', feishu: FEISHU }, {
+      oc_synthetic: { primary: { turnBudget: { deadlineMs: 5000, wrapUpReserveMs: 0 } } },
+    }), 'oc_synthetic').primary.turnBudget.wrapUpReserveMs).toBe(0);
+    expect(() => fixture({ platform: 'feishu', feishu: FEISHU }, {
       oc_synthetic: { primary: { turnBudget: { maxParticipationCalls: -1 } } },
     })).toThrow();
   });

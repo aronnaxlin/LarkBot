@@ -93,6 +93,7 @@ chats:
         maxParticipationCalls: 3 # combined sends/reactions; end_turn is exempt
         deadlineMs: 15000 # from primary start, probe excluded; does not abort an in-flight tool
         minModelCallMs: 2000 # must be less than deadlineMs
+        wrapUpReserveMs: 6000 # below this much time left, the next step only answers (0 = off)
       # Replay provider reasoning only for this many newest turn responses, plus
       # the current interrupted tool chain (Anthropic requires its thinking
       # blocks). Older reasoning is dropped from the request, not from storage.

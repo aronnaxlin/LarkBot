@@ -46,6 +46,7 @@ const TurnBudgetOverrideSchema = v.partial(v.object({
   maxParticipationCalls: v.pipe(v.number(), v.integer(), v.minValue(0)),
   deadlineMs: v.pipe(v.number(), v.integer(), v.minValue(1)),
   minModelCallMs: v.pipe(v.number(), v.integer(), v.minValue(1)),
+  wrapUpReserveMs: v.pipe(v.number(), v.integer(), v.minValue(0)),
 }));
 
 // Probe HTTP bound, separate from primary.turnBudget.deadlineMs; the endpoint's
@@ -385,6 +386,11 @@ const resolveTurnBudget = (chatId: string, merged: ChatConfig): TurnBudget => {
   // one model step; otherwise the open chain could never close.
   if (budget.deadlineMs <= budget.minModelCallMs)
     throw new Error(`Chat ${chatId}: primary.turnBudget.deadlineMs (${budget.deadlineMs}) must be greater than minModelCallMs (${budget.minModelCallMs})`);
+  // The reserve must leave room for the wrap-up's own model call and must not
+  // swallow the whole deadline (every step would be a wrap-up).
+  const reserve = budget.wrapUpReserveMs ?? 0;
+  if (reserve > 0 && (reserve < budget.minModelCallMs || reserve >= budget.deadlineMs))
+    throw new Error(`Chat ${chatId}: primary.turnBudget.wrapUpReserveMs (${reserve}) must be 0 or between minModelCallMs (${budget.minModelCallMs}) and deadlineMs (${budget.deadlineMs})`);
   return budget;
 };
 

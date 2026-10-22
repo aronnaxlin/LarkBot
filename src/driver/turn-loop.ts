@@ -85,6 +85,7 @@ export const runTurnLoop = async (
   const { budget } = params;
   const used: TurnBudgetUsage = { toolRounds: 0, toolCalls: 0, ...params.budgetUsed };
   const hasTimeForModelCall = () => params.deadlineAtMs - Date.now() >= budget.minModelCallMs;
+  const isShortOnTime = () => params.deadlineAtMs - Date.now() < (budget.wrapUpReserveMs ?? 0);
   let workingEntries = [...params.entries];
 
   if (!hasTimeForModelCall()) {
@@ -94,7 +95,7 @@ export const runTurnLoop = async (
   }
 
   for (let step = 1; ; step++) {
-    const wrapUp = used.toolRounds >= budget.maxToolRounds || used.toolCalls >= budget.maxToolCalls;
+    const wrapUp = used.toolRounds >= budget.maxToolRounds || used.toolCalls >= budget.maxToolCalls || isShortOnTime();
     const modelStep = await operations.callModelStep(workingEntries, step, {
       wrapUp,
       deadlineAtMs: params.deadlineAtMs,
@@ -116,7 +117,8 @@ export const runTurnLoop = async (
     // end_turn is explicit: it closes the turn even beside follow-up results.
     // A react_only turn is one step by construction: `react` reports follow-up,
     // but there is no message or work tool to wait for. The wrap-up is the last
-    // step. Out of time, the turn ends silently.
+    // step; running short on time makes the next step the wrap-up, so only a
+    // step that leaves less than minModelCallMs ends the turn silently.
     let closeReason: string | undefined;
     if (anyRequiresFollowUp) {
       if (endTurnCalled) closeReason = 'end_turn';

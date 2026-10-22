@@ -62,6 +62,31 @@ describe('shell access wording', () => {
   });
 });
 
+describe('plugin prompt hints', () => {
+  it('renders extension prompt hints in primary mode only when provided', async () => {
+    const withHints = await renderTemplate('system.velin.md', {
+      mode: 'primary',
+      ...SYSTEM_PROPS,
+      promptHints: ['**Mini-games:** public announcements appear here.'],
+    });
+    expect(withHints).toContain('Mini-games');
+    expect(withHints).toContain('public announcements appear here.');
+
+    const withoutHints = await renderTemplate('system.velin.md', {
+      mode: 'primary',
+      ...SYSTEM_PROPS,
+      promptHints: [],
+    });
+    expect(withoutHints).not.toContain('Mini-games');
+
+    const unset = await renderTemplate('system.velin.md', {
+      mode: 'primary',
+      ...SYSTEM_PROPS,
+    });
+    expect(unset).toEqual(withoutHints);
+  });
+});
+
 // Remaining prompt templates compile
 describe.each([
   'compaction-system.velin.md',

@@ -12,6 +12,7 @@ import type { MediaRuntime } from '../media/runtime';
 import type { MemoryDeps } from '../memory/deps';
 import type { MemoryBackend } from '../memory/types';
 import type { createPipeline } from '../pipeline';
+import type { PluginHost } from '../plugins/host';
 import type { PlatformIdentity, PlatformRuntime } from '../startup/platform';
 import type { TelegramDriverHooks, TelegramLiveHandlers, TelegramManager, TelegramPostStartupTasks } from '../telegram';
 import type { TelegramClients } from '../telegram/manager';
@@ -56,6 +57,7 @@ export const TOKENS = {
   FEISHU_DRIVER_PLATFORM: token<DriverPlatform>('FeishuDriverPlatform'),
   FEISHU_RUNTIME: token<PlatformRuntime>('FeishuRuntime'),
   TELEGRAM_RUNTIME: token<PlatformRuntime>('TelegramRuntime'),
+  PLUGIN_HOST: token<PluginHost>('PluginHost'),
   // Resolve to the implementation selected by `config.platform`.
   PLATFORM_IDENTITY: token<PlatformIdentity>('PlatformIdentity'),
   PLATFORM_RUNTIME: token<PlatformRuntime>('PlatformRuntime'),

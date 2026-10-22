@@ -11,6 +11,7 @@ import { registerMemory } from './registrars/memory';
 import { registerPersistence } from './registrars/persistence';
 import { registerPipeline } from './registrars/pipeline';
 import { registerPlatform } from './registrars/platform';
+import { registerPlugins } from './registrars/plugins';
 import { registerTelegram } from './registrars/telegram';
 import type { Token } from './tokens';
 
@@ -24,6 +25,7 @@ const registrars = [
   registerPipeline,
   registerMemory,
   registerDriver,
+  registerPlugins,
 ] as const;
 
 export const buildContainer = () => {

@@ -51,6 +51,8 @@ export const renderSystemPrompt = async (params: {
   // Person memory is injected into this chat's prompts. Gates the "Your notes"
   // paragraph; absent/false renders a byte-identical prompt.
   memoryEnabled?: boolean;
+  // Gated extension hints contributed by enabled plugins for this chat.
+  promptHints?: string[];
 }) => {
   const { rendered } = await renderMarkdownString(systemPromptTemplate, params, basePath);
   return cleanVelinOutput(rendered);

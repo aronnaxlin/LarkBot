@@ -4,12 +4,12 @@ import { afterEach, describe, expect, it, vi } from 'vitest';
 import { createFeishuDriverPlatform } from './driver-platform';
 import { createFeishuIngress } from './ingress';
 import { createFeishuUserNames } from './user-names';
-import type { CanonicalIMEvent } from '../adaptation/types';
 import { createDatabase, runMigrations } from '../db/client';
 import type { DB } from '../db/client';
 import { canonicalMessageExists, hasEventDedupKey, loadEvents, persistDedupedEvent } from '../db/persistence';
 import { createEventSink } from '../event-sink';
 import { createPipeline } from '../pipeline';
+import type { PipelineEvent } from '../projection/reduce';
 import type { RenderedContext } from '../rendering/types';
 
 initLogger(LogLevel.Error, Format.Pretty);
@@ -57,7 +57,7 @@ const createFixture = (options: { db?: DB; failPublish?: () => boolean } = {}) =
   const database = db;
   const pipeline = createPipeline({ botUserId: BOT });
   const driverEvents: Array<{ chatId: string; context: RenderedContext }> = [];
-  const pushPipelineEvent = vi.fn((chatId: string, event: CanonicalIMEvent) => {
+  const pushPipelineEvent = vi.fn((chatId: string, event: PipelineEvent) => {
     if (options.failPublish?.()) throw new Error('synthetic publish failure');
     return pipeline.pushEvent(chatId, event);
   });

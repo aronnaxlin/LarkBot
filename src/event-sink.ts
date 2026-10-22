@@ -1,13 +1,13 @@
-import type { CanonicalIMEvent } from './adaptation/types';
+import type { PipelineEvent } from './projection/reduce';
 import type { RenderedContext } from './rendering/types';
 
 export interface EventSink {
-  persist(event: CanonicalIMEvent): void;
-  publish(event: CanonicalIMEvent, options?: {
+  persist(event: PipelineEvent): void;
+  publish(event: PipelineEvent, options?: {
     hydrateAltText?: boolean;
     notifyDriver?: boolean;
   }): RenderedContext | undefined;
-  accept(event: CanonicalIMEvent, options?: {
+  accept(event: PipelineEvent, options?: {
     hydrateAltText?: boolean;
     notifyDriver?: boolean;
   }): RenderedContext | undefined;
@@ -15,16 +15,16 @@ export interface EventSink {
 
 export const createEventSink = (deps: {
   configuredChatIds: ReadonlySet<string>;
-  persistEvent: (event: CanonicalIMEvent) => void;
-  hydrateAltText: (event: CanonicalIMEvent) => void;
-  pushPipelineEvent: (chatId: string, event: CanonicalIMEvent) => RenderedContext;
+  persistEvent: (event: PipelineEvent) => void;
+  hydrateAltText: (event: PipelineEvent) => void;
+  pushPipelineEvent: (chatId: string, event: PipelineEvent) => RenderedContext;
   handleDriverEvent: (chatId: string, context: RenderedContext) => void;
 }): EventSink => {
-  const persisted = new WeakSet<CanonicalIMEvent>();
-  const published = new WeakMap<CanonicalIMEvent, RenderedContext>();
-  const notified = new WeakSet<CanonicalIMEvent>();
+  const persisted = new WeakSet<PipelineEvent>();
+  const published = new WeakMap<PipelineEvent, RenderedContext>();
+  const notified = new WeakSet<PipelineEvent>();
 
-  const persist = (event: CanonicalIMEvent): void => {
+  const persist = (event: PipelineEvent): void => {
     if (persisted.has(event)) return;
     deps.persistEvent(event);
     persisted.add(event);

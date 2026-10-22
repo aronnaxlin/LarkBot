@@ -67,6 +67,7 @@ disk only holds the images, and `docker compose up` never rebuilds:
 
 ```sh
 # on the build machine, in the repository
+git submodule update --init   # plugins/ (LuckyBot-Plugin) is baked into the image
 docker buildx build --platform linux/arm64 -t larkbot:arm64 --load .
 docker buildx build --platform linux/arm64 -f deploy/sandbox.Dockerfile -t larkbot-sandbox:arm64 --load deploy/
 docker save larkbot:arm64 larkbot-sandbox:arm64 | gzip -1 | \

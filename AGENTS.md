@@ -43,6 +43,7 @@ Node >=22, TypeScript, pnpm, tdl/libtdjson, better-sqlite3 + Drizzle, Immer, ali
 ## Ownership
 
 ```text
+plugins/          Git submodule: LuckyBot-Plugin contract (SDK) and plugin modules
 src/
 ├── adaptation/   Canonical event/content types and platform-neutral content helpers
 ├── projection/   Pure IC reducer
@@ -52,6 +53,7 @@ src/
 ├── media/        Thumbnails, frame extraction, alt-text resolvers, media runtime
 ├── driver/       Scheduling, probe/primary wake-up, runner, tools, compaction
 ├── memory/       Per-person Markdown memory: store, consolidator, controller, injection
+├── plugins/      Core plugin host, capability injection, unified HTTP server
 ├── telegram/     TDLib clients, manager, adaptation, ingress/egress adapters
 ├── feishu/       Official SDK boundary, credentials, group ingress and outbound
 ├── event-sink.ts Shared canonical event persistence/publication
@@ -79,9 +81,9 @@ Construction order breaks cycles explicitly:
 - Driver is attached before Telegram start, but the bus buffers the latest RC per chat until activation.
 - Memory deps (`MEMORY_DEPS`: the Markdown backend plus DB closures for window, count, evidence and cursor) are built by the memory registrar after the Pipeline and handed to `createDriver`; business factories never receive the container.
 
-Startup selects a lazy platform runtime: build container and migrate DB -> prepare platform identity -> cold replay -> attach Driver and ingress -> start selected platform -> activate Driver -> recover background tasks -> seed current RC -> platform post-startup. Feishu mode does not initialize TDLib or require Telegram credentials.
+Startup selects a lazy platform runtime: build container and migrate DB -> prepare platform identity -> cold replay -> attach Driver and ingress -> start selected platform -> activate Driver -> recover background tasks -> start plugins & unified HTTP server -> seed current RC -> platform post-startup. Feishu mode does not initialize TDLib or require Telegram credentials.
 
-Shutdown is idempotent: deactivate Driver input -> stop Driver -> checkpoint background tasks -> stop the selected platform -> close SQLite -> dispose the DI container.
+Shutdown is idempotent: deactivate Driver input -> stop plugins & HTTP server -> stop Driver -> checkpoint background tasks -> stop the selected platform -> close SQLite -> dispose the DI container.
 
 ## Core Invariants
 
@@ -123,6 +125,16 @@ Implemented in phase 1; design and rationale in [docs/memory-design.md](docs/mem
 - **No chat instruction writes memory.** "莱克记住 …" ("Lucky, remember …") from any member, maintainers included, is a message the consolidator may weigh but never obeys; it never records dictated rules of behaviour, forms of address or persona changes. `SELF.md` is the bot's own judgement plus hand edits. Memory grants no permissions: maintainers still come only from `maintainers`.
 - **Injection.** The late-binding prompt (after the chatlog, so the cached prefix is unchanged) gets `SELF.md` plus the cards of the newest `recentSpeakers` human senders among the last `lookbackMessages` message segments, the newest sender's card first and marked `current="true"`, within `injectionMaxChars` (4000, equal shares with redistribution; newest entries kept, evidence aliases stripped) and `selfInjectionChars`. The probe gets `SELF.md` only. The snapshot is read once per wake-up before the probe (`loadMemorySnapshot`), and an unreadable directory degrades to no notes. `inject: false` is shadow mode: cards are written, nothing is injected, and the system-prompt "Your notes" paragraph is not rendered.
 - **Config.** `memoryDir` (global) and `chats.<id>.memory` (`enabled`, `inject`, `model` → `compaction.model` → `primary.model`, `triggerMessages`, `maxWindowMessages`, `cardMaxChars`, `selfMaxChars`, `hearsayMaxEntries`, `hearsayMaxChars`, `injectionMaxChars`, `selfInjectionChars`, `lookbackMessages`, `recentSpeakers`, `doNotReadd`); `injectionMaxChars / recentSpeakers >= cardMaxChars / 2` and the other cross-field rules are checked on the merged chat config. Real-model and live Feishu behaviour are unverified.
+
+### Plugins
+
+Core acts as the host; the plugin repository (`plugins/`, submodule pointing to `LuckyBot-Plugin`) holds the contract (`sdk/`) and plugin modules. Full specification in `docs/plugins.md`.
+
+- **Capabilities and Isolation.** Plugins never receive the DI container, database connections, platform clients (TDLib/Feishu), or chat context (IC/RC). They receive only injected capabilities: `callModel`, `http.route`, `chat.publish`, `storage`, `log`, and `media.send`.
+- **Privacy Invariant.** Private plugin state (such as secret card hands, private round info, internal tokens) resides exclusively in plugin memory or local storage. It must never enter projection, IC, RC, events or turn responses tables, or prompts. The only bridge into a group is `chat.publish`, which takes only public, broadcast-safe text.
+- **Per-Chat Gating.** Plugins are disabled globally and per chat by default (`chats.<id>.plugins.<pluginId>.enabled: false`). `chat.publish` drops calls for unconfigured or disabled chats.
+- **Prompt Hints.** Plugins may contribute system prompt hints (`promptHints`) rendered only for chats where the plugin is enabled; disabled chats render byte-identical prompts.
+- **SDK Versioning.** Breaking capability changes bump `sdkVersion`; the host checks compatibility on startup and fails fast on mismatch.
 
 ### Consistency Above Availability
 

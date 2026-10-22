@@ -59,6 +59,7 @@ const makeChatConfig = (): ResolvedChatConfig => ({
   imageToText: { enabled: false, maxConcurrency: 1 },
   animationToText: { enabled: false, maxFrames: 0, maxConcurrency: 1 },
   customEmojiToText: { enabled: false, maxFrames: 0, maxConcurrency: 1 },
+  plugins: {},
   tools: { banSpammer: false, bash: { enabled: true, backgroundThresholdSec: 10, requireMaintainer: false, maintainerWindowSec: 600 } },
 });
 

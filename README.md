@@ -29,6 +29,7 @@ On top of it, LuckyBot adds:
 - **Per-Person Long-Term Memory (Phase 1):** Human-readable Markdown cards per member (`people/<open_id>.md`) and self-notes (`SELF.md`), maintained by an asynchronous background consolidator with strict provenance validation, owner-evidence requirements, and prompt-injection safety guards.
 - **Safe & Bounded Tool Execution:** Strict per-turn budgets (tool rounds, work-tool limits, model deadlines) prevent runaway loops. System shell access (`bash`, `kill_task`, `read_task_output`) is strictly gated by a trusted maintainer list and executed inside an isolated sandbox container.
 - **Autonomous Context Compaction:** Background compaction controller summarizes older context when estimated token counts exceed thresholds, preserving conversation continuity.
+- **Modular Plugin System:** Capability-based plugin host running independent extension modules (mounted from `plugins/`, e.g. group mini-game webhooks) with strict memory/chat privacy isolation and per-chat gating.
 
 ## Quick Start
 
@@ -72,6 +73,7 @@ All runtime configuration lives in `config.yaml` (see [config.example.yaml](conf
 Detailed architectural and operational documentation is organized as follows:
 
 ### Design
+- [Plugin System Specification](docs/plugins.md): Architecture of the capability-based plugin host, extension points, and privacy invariants.
 - [Context Pipeline Design](docs/dcp-design.md): Architecture of the pure projection reducer, canonical events, and XML rendering pipeline.
 - [Driver Feature Guide](docs/driver-feature-guide.md): Driver lifecycle, probe gating, primary tool loop, turn budgets, and tool authoring.
 - [Driver Participation Implementation](docs/driver-participation-implementation.md): Participation policy, wake-up decisions, and volume controls.

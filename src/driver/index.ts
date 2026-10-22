@@ -47,6 +47,8 @@ export const createDriver = (config: DriverConfig, deps: DriverPlatform & {
   // Person memory (backend + DB closures). Absent, or disabled for a chat,
   // leaves that chat's prompts and behaviour exactly as without memory.
   memory?: MemoryDeps;
+  // Gated extension hints contributed by enabled plugins for this chat.
+  getSystemPromptHints?: (chatId: string) => string[];
   backgroundTask: {
     startTask: (typeName: string, sessionId: string, params: unknown, intention: string | undefined, timeoutMs: number) => number;
     killTask: (taskId: number) => { ok: boolean; error?: string };
@@ -178,6 +180,7 @@ export const createDriver = (config: DriverConfig, deps: DriverPlatform & {
             probeWindow,
             memoryEnabled: memory.injecting,
             loadMemorySnapshot: memory.loadSnapshot,
+            promptHints: deps.getSystemPromptHints?.(chatId),
             log,
           });
           return { kind: 'done' };

@@ -77,6 +77,8 @@ export const executeWakeup = async (params: {
   // view from primary's. Absent or null leaves every prompt untouched.
   memoryEnabled?: boolean;
   loadMemorySnapshot?: (context: RenderedContext) => MemorySnapshot | null;
+  // Gated extension hints contributed by enabled plugins for this chat.
+  promptHints?: string[];
   // Set when retrying this context after primary failed transiently: probe
   // already activated it, so judging again would only add latency.
   probeActivation?: ProbeActivation;
@@ -290,6 +292,7 @@ export const executeWakeup = async (params: {
       brakeMessages10m: participation.brakeMessages10m,
       botRounds: participation.botRounds,
       ...(memoryEnabled ? { memoryEnabled: true } : {}),
+      ...(params.promptHints && params.promptHints.length > 0 ? { promptHints: params.promptHints } : {}),
     });
     injectLateBindingPrompt(primaryContext.entries, await renderLateBindingPrompt({
       mode: 'primary',

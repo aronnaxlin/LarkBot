@@ -37,6 +37,7 @@ const configWith = (memory: Partial<typeof DEFAULT_MEMORY_CONFIG>, blockedUserId
   imageToText: { enabled: false, maxConcurrency: 1 },
   animationToText: { enabled: false, maxFrames: 0, maxConcurrency: 1 },
   customEmojiToText: { enabled: false, maxFrames: 0, maxConcurrency: 1 },
+  plugins: {},
   tools: { banSpammer: false, bash: { enabled: false, backgroundThresholdSec: 10, requireMaintainer: true, maintainerWindowSec: 600 } },
 });
 

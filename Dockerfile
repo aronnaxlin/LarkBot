@@ -99,6 +99,8 @@ WORKDIR /app
 COPY --from=build /app/node_modules ./node_modules
 COPY package.json tsconfig.json ./
 COPY src ./src
+# Plugin sources (git submodule) are imported by src/ through a relative path.
+COPY plugins/src ./plugins/src
 COPY drizzle ./drizzle
 # Only tracked prompt templates are baked in; prompts/IDENTITY.md and any other
 # deployment-local file listed in a chat's systemFiles are bind-mounted at

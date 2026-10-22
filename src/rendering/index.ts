@@ -309,6 +309,10 @@ const renderSystemEvent = (event: ICSystemEvent, state: RenderState): string => 
 
 const renderRuntimeEvent = (event: ICRuntimeEvent, state: RenderState): string => {
   const t = formatStamp(event.timestampSec, event.utcOffsetMin, state.localUtcOffsetMin);
+  if (event.kind === 'plugin_event') {
+    return `<plugin-event plugin="${escapeXml(event.plugin)}" t="${t}">${escapeXml(event.text)}</plugin-event>`;
+  }
+
   const attrs = [
     `type="${event.kind}"`,
     `task-id="${event.taskId}"`,

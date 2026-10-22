@@ -52,6 +52,20 @@ telegram:
 database:
   path: "./data/cahciua.db"
 
+# Modular plugins (docs/plugins.md).
+# Plugins are mounted under plugins/ and declared statically.
+# Secret credentials live in this git-ignored file.
+plugins:
+  server:
+    host: "0.0.0.0"
+    port: 8787
+  tavern:
+    enabled: false
+    secret: ""            # shared HMAC secret agreed with the dealer; kept out of git
+    model: "probe"        # model used for game decisions
+    decisionTimeoutMs: 10000
+    tableName: "LuckyBot" # table name shown at the dealer
+
 # Person memory (docs/memory-design.md): Markdown cards per member under
 # <memoryDir>/<chatId>/. Must sit under the writable data volume; enable it per
 # chat with chats.<id>.memory below.
@@ -188,6 +202,9 @@ chats:
       botRounds: 2
       # requested: answer another bot only when a human asks; open: engage on its own.
       botInteraction: "requested"
+    plugins:
+      tavern:
+        enabled: false
     tools:
       # Enable per chat only; moderation policy belongs in that chat's systemFiles.
       banSpammer: false

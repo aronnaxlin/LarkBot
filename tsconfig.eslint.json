@@ -9,6 +9,7 @@
   },
   "include": [
     "src/**/*.ts",
+    "plugins/src/**/*.ts",
     "scripts/**/*.ts",
     "eslint.config.ts"
   ],

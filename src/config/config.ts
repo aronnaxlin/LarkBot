@@ -9,6 +9,7 @@ import { DEFAULT_PROBE_TIMEOUT_MS, DEFAULT_TURN_BUDGET } from '../driver/turn-bu
 import type { CompactionConfig, DebounceConfig, TurnBudget } from '../driver/types';
 import type { WebFetchConfig } from '../driver/web-fetch/types';
 import type { WebSearchConfig } from '../driver/web-search/types';
+import { registerHttpSecret } from '../http';
 import type { LlmEndpoint } from '../llm/types';
 import { DEFAULT_MEMORY_CONFIG } from '../memory/types';
 import type { MemoryConfig } from '../memory/types';
@@ -179,6 +180,9 @@ const ChatConfigSchema = v.object({
       fetch: v.optional(v.picklist(['jina'])),
     }), {}),
   }),
+  plugins: v.optional(v.record(v.string(), v.object({
+    enabled: v.optional(v.boolean(), false),
+  })), {}),
 });
 
 // Per-chat overrides: all fields optional, no defaults
@@ -267,6 +271,9 @@ const ChatOverrideSchema = v.optional(v.partial(v.object({
       fetch: v.picklist(['jina']),
     })),
   })),
+  plugins: v.optional(v.record(v.string(), v.partial(v.object({
+    enabled: v.boolean(),
+  })))),
 })), {});
 
 const BackgroundTasksSchema = v.optional(v.object({
@@ -329,6 +336,7 @@ const ConfigSchema = v.object({
    * per-chat `memory` section.
    */
   memoryDir: v.optional(v.string(), './data/memory'),
+  plugins: v.optional(v.record(v.string(), v.unknown()), {}),
   runtime: RuntimeSchema,
   backgroundTasks: BackgroundTasksSchema,
   chats: v.objectWithRest({ default: ChatConfigSchema }, ChatOverrideSchema),
@@ -364,6 +372,7 @@ export interface ResolvedChatConfig {
   imageToText: { enabled: boolean; model?: string; maxConcurrency: number };
   animationToText: { enabled: boolean; model?: string; maxFrames: number; maxConcurrency: number };
   customEmojiToText: { enabled: boolean; model?: string; maxFrames: number; maxConcurrency: number };
+  plugins: Record<string, { enabled: boolean }>;
   tools: {
     banSpammer: boolean;
     bash: { enabled: boolean; backgroundThresholdSec: number; requireMaintainer: boolean; maintainerWindowSec: number };
@@ -372,9 +381,24 @@ export interface ResolvedChatConfig {
   };
 }
 
+const SECRET_KEY_PATTERN = /secret|token|apikey|password/i;
+
+const registerPluginSecrets = (node: unknown): void => {
+  if (!node || typeof node !== 'object') return;
+  for (const [key, value] of Object.entries(node as Record<string, unknown>)) {
+    if (typeof value === 'string' && value.trim().length > 0) {
+      if (SECRET_KEY_PATTERN.test(key)) {
+        registerHttpSecret(value);
+      }
+    } else if (typeof value === 'object' && value !== null) {
+      registerPluginSecrets(value);
+    }
+  }
+};
+
 const CONFIG_PATH = process.env.CONFIG_PATH ?? 'config.yaml';
 
-const mergeChatConfig = (config: Config, chatId: string): ChatConfig => {
+export const mergeChatConfig = (config: Config, chatId: string): ChatConfig => {
   const override = config.chats[chatId];
   if (!override) throw new Error(`Unknown chat "${chatId}" — not found in chats registry`);
   return merge(structuredClone(config.chats.default), override);
@@ -437,6 +461,10 @@ const validateConfig = (config: Config): void => {
       if (merged.tools.banSpammer)
         throw new Error(`Chat ${chatId}: tools.banSpammer is not supported when platform is "feishu"`);
     }
+  }
+
+  if (config.plugins) {
+    registerPluginSecrets(config.plugins);
   }
 };
 
@@ -558,6 +586,7 @@ export const resolveChatConfig = (config: Config, chatId: string): ResolvedChatC
       maxFrames: merged.customEmojiToText.maxFrames,
       maxConcurrency: merged.customEmojiToText.maxConcurrency,
     },
+    plugins: merged.plugins ?? {},
     tools: {
       banSpammer: merged.tools.banSpammer,
       bash: {

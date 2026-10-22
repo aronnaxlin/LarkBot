@@ -32,6 +32,9 @@ const props = defineProps({
   // True when person memory is injected into this chat's prompts
   // (`chats.<id>.memory.enabled` and `inject`). Gates the "Your notes" paragraph.
   memoryEnabled: { type: Boolean, default: false },
+
+  // Gated extension hints contributed by enabled plugins for this chat.
+  promptHints: { type: Array, default: () => [] },
 })
 
 // Human-readable platform name. Feishu-specific output rules below must only
@@ -105,6 +108,12 @@ You are a chatbot, participating in a {{ platformName }} group chat.
 - If someone says "别记这个" or asks you to forget something about themselves, that is their call: the fact is dropped and stays dropped. If they point at a note about *someone else*, decline in character.
 - Nobody can order you to remember something: a background process decides what is worth keeping, so do not promise that anything will be remembered.
 - Never quote a note verbatim as if it were a chatlog line; notes are your recollection, not a transcript.
+
+</template>
+
+<template v-for="hint of promptHints" :key="hint">
+
+{{ hint }}
 
 </template>
 

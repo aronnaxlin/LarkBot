@@ -139,15 +139,25 @@ const eventValues = (event: PipelineEvent): typeof events.$inferInsert => {
   };
 
   if (event.type === 'runtime') {
-    const runtimeData: RuntimeEventData = {
-      kind: event.kind,
-      taskId: event.taskId,
-      taskType: event.taskType,
-      intention: event.intention,
-      finalSummary: event.finalSummary,
-      hasFullOutput: event.hasFullOutput,
-    };
-    return { ...base, runtimeData };
+    if (event.kind === 'task_completed') {
+      const runtimeData: RuntimeEventData = {
+        kind: event.kind,
+        taskId: event.taskId,
+        taskType: event.taskType,
+        intention: event.intention,
+        finalSummary: event.finalSummary,
+        hasFullOutput: event.hasFullOutput,
+      };
+      return { ...base, runtimeData };
+    }
+    if (event.kind === 'plugin_event') {
+      const runtimeData: RuntimeEventData = {
+        kind: event.kind,
+        plugin: event.plugin,
+        text: event.text,
+      };
+      return { ...base, runtimeData };
+    }
   }
   if (event.type === 'delete') return { ...base, messageIds: event.messageIds };
   if (event.type === 'service') {
@@ -279,6 +289,18 @@ const reconstructServiceEvent = (row: EventRow): CanonicalServiceEvent => {
 
 const reconstructRuntimeEvent = (row: EventRow): RuntimeEvent => {
   const data = row.runtimeData!;
+  if (data.kind === 'plugin_event') {
+    return {
+      type: 'runtime',
+      kind: 'plugin_event',
+      chatId: row.chatId,
+      receivedAtMs: row.receivedAtMs,
+      timestampSec: row.timestampSec,
+      utcOffsetMin: row.utcOffsetMin,
+      plugin: data.plugin,
+      text: data.text,
+    };
+  }
   return {
     type: 'runtime',
     kind: data.kind,

@@ -186,19 +186,32 @@ const reduceService = (draft: IntermediateContext, event: CanonicalServiceEvent)
 };
 
 const reduceRuntime = (draft: IntermediateContext, event: RuntimeEvent) => {
-  const node: ICRuntimeEvent = {
-    type: 'runtime_event',
-    kind: event.kind,
-    receivedAtMs: event.receivedAtMs,
-    timestampSec: event.timestampSec,
-    utcOffsetMin: event.utcOffsetMin,
-    taskId: event.taskId,
-    taskType: event.taskType,
-    intention: event.intention,
-    finalSummary: event.finalSummary,
-    hasFullOutput: event.hasFullOutput,
-  };
-  draft.nodes.push(node);
+  if (event.kind === 'task_completed') {
+    const node: ICRuntimeEvent = {
+      type: 'runtime_event',
+      kind: 'task_completed',
+      receivedAtMs: event.receivedAtMs,
+      timestampSec: event.timestampSec,
+      utcOffsetMin: event.utcOffsetMin,
+      taskId: event.taskId,
+      taskType: event.taskType,
+      intention: event.intention,
+      finalSummary: event.finalSummary,
+      hasFullOutput: event.hasFullOutput,
+    };
+    draft.nodes.push(node);
+  } else if (event.kind === 'plugin_event') {
+    const node: ICRuntimeEvent = {
+      type: 'runtime_event',
+      kind: 'plugin_event',
+      receivedAtMs: event.receivedAtMs,
+      timestampSec: event.timestampSec,
+      utcOffsetMin: event.utcOffsetMin,
+      plugin: event.plugin,
+      text: event.text,
+    };
+    draft.nodes.push(node);
+  }
 };
 
 export const reduce = (ic: IntermediateContext, event: PipelineEvent): IntermediateContext =>

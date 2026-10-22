@@ -30,6 +30,7 @@ export const startApp = async (): Promise<void> => {
   const driver = container.get(TOKENS.DRIVER);
   const driverInput = container.get(TOKENS.DRIVER_INPUT_BUS);
   const backgroundTasks = container.get(TOKENS.BACKGROUND_TASK_MANAGER);
+  const pluginHost = container.get(TOKENS.PLUGIN_HOST);
 
   for (const chatId of findChatsWithUnreachableShellGate(container.get(TOKENS.CONFIG)))
     logger.withFields({ chatId }).warn('tools.bash is enabled and maintainer-gated, but no maintainers are configured; shell tools will never be exposed in this chat');
@@ -48,6 +49,7 @@ export const startApp = async (): Promise<void> => {
           errors.push(error);
         }
       };
+      if (pluginHost.isRunning()) await attempt(pluginHost.stop);
       await attempt(driver.stop);
       await attempt(backgroundTasks.shutdown);
       if (platformStartAttempted) await attempt(platform.stop);
@@ -104,6 +106,7 @@ export const startApp = async (): Promise<void> => {
     await platform.start();
     driverInput.activate();
     backgroundTasks.recoverTasks();
+    await pluginHost.start();
 
     for (const [chatId, context] of pipeline.getRenderedChats())
       driverInput.handleEvent(chatId, context);

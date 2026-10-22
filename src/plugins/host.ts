@@ -1,0 +1,280 @@
+import { mkdirSync } from 'node:fs';
+import { resolve } from 'node:path';
+
+import type { Logger } from '@guiiai/logg';
+import * as v from 'valibot';
+
+import { createPluginHttpServer, type PluginHttpServer } from './http-server';
+import {
+  CURRENT_SDK_VERSION,
+  type ChatPublishOptions,
+  type HttpRoute,
+  type PluginCapabilities,
+  type PluginContext,
+  type PluginDefinition,
+  type PluginLogger,
+  type PromptHint,
+} from '../../plugins/src/sdk';
+import { mergeChatConfig, resolveModel, type Config } from '../config/config';
+import type { EventSink } from '../event-sink';
+import { callLlm, type LlmCallConfig } from '../llm/call';
+import type { RuntimePluginEvent } from '../runtime-event';
+import type { ConversationEntry, OutputMessage, TextPart } from '../unified-api/types';
+
+export interface PluginHost {
+  start(): Promise<void>;
+  stop(): Promise<void>;
+  isRunning(): boolean;
+  getHttpServer(): PluginHttpServer;
+  getSystemPromptHints(chatId: string): string[];
+}
+
+export interface PluginHostDeps {
+  config: Config;
+  eventSink: EventSink;
+  logger: Logger;
+  plugins: readonly PluginDefinition<unknown>[];
+  dataDir?: string;
+}
+
+const wrapLogger = (logger: Logger): PluginLogger => ({
+  log: (msg, fields) => logger.withFields(fields ?? {}).log(msg),
+  warn: (msg, fields) => logger.withFields(fields ?? {}).warn(msg),
+  error: (msg, fields) => logger.withFields(fields ?? {}).error(msg),
+  debug: (msg, fields) => logger.withFields(fields ?? {}).debug(msg),
+  withFields: fields => wrapLogger(logger.withFields(fields)),
+  withError: err => wrapLogger(logger.withError(err)),
+});
+
+export const createPluginHost = (deps: {
+  config: Config;
+  eventSink: EventSink;
+  logger: Logger;
+  plugins: readonly PluginDefinition<unknown>[];
+  dataDir?: string;
+  callModelOverride?: (modelName: string, prompt: string, options?: { timeoutSec?: number; dumpId?: string }) => Promise<string>;
+}): PluginHost => {
+  const hostLogger = deps.logger.withContext('plugin-host');
+  const httpServer = createPluginHttpServer(deps.logger.withContext('plugin-http'));
+  const activePlugins = new Map<string, PluginDefinition<unknown>>();
+  const activePromptHints = new Map<string, (chatId: string) => PromptHint[] | undefined>();
+  let running = false;
+
+  const isPluginEnabled = (pluginId: string): boolean => {
+    const rawConf = deps.config.plugins?.[pluginId];
+    if (rawConf && typeof rawConf === 'object' && 'enabled' in (rawConf as Record<string, unknown>)) {
+      return (rawConf as Record<string, unknown>).enabled !== false;
+    }
+    return rawConf !== undefined;
+  };
+
+  const isPluginEnabledForChat = (chatId: string, pluginId: string): boolean => {
+    if (!deps.config.chats[chatId]) return false;
+    const merged = mergeChatConfig(deps.config, chatId);
+    const pluginConf = merged.plugins?.[pluginId];
+    return pluginConf?.enabled === true;
+  };
+
+  const createCapabilities = (pluginId: string): PluginCapabilities => {
+    const pluginLog = deps.logger.withContext(`plugin:${pluginId}`);
+    const dataRoot = resolve(deps.dataDir ?? './data', 'plugins', pluginId);
+
+    const callModel: PluginCapabilities['callModel'] = async (modelName, promptInput, options) => {
+      if (deps.callModelOverride) {
+        const text = typeof promptInput === 'string' ? promptInput : promptInput.user;
+        return await deps.callModelOverride(modelName, text, options);
+      }
+
+      const endpoint = resolveModel(deps.config, modelName);
+      const timeoutSec = options?.timeoutSec ?? endpoint.timeoutSec ?? 15;
+      const llmConfig: LlmCallConfig = {
+        apiBaseUrl: endpoint.apiBaseUrl,
+        apiKey: endpoint.apiKey,
+        model: endpoint.model,
+        apiFormat: endpoint.apiFormat,
+        extraBody: endpoint.extraBody,
+        timeoutSec,
+      };
+
+      const system = typeof promptInput === 'object' && promptInput.system ? promptInput.system : '';
+      const userText = typeof promptInput === 'string' ? promptInput : promptInput.user;
+
+      const entries: ConversationEntry[] = [
+        {
+          kind: 'message',
+          role: 'user',
+          parts: [{ kind: 'text', text: userText }],
+        },
+      ];
+
+      const result = await callLlm(
+        llmConfig,
+        entries,
+        system,
+        undefined,
+        {
+          log: pluginLog,
+          label: `plugin:${pluginId}`,
+          dumpId: options?.dumpId,
+        },
+      );
+
+      return result.entries
+        .filter((e): e is OutputMessage => e.kind === 'message' && e.role === 'assistant')
+        .flatMap(e => e.parts)
+        .filter((p): p is TextPart => p.kind === 'text')
+        .map(p => p.text)
+        .join('\n');
+    };
+
+    const route = (r: HttpRoute) => {
+      httpServer.registerRoute(r);
+    };
+
+    const publish = (chatId: string, options: ChatPublishOptions) => {
+      if (!isPluginEnabledForChat(chatId, pluginId)) {
+        hostLogger.withFields({ chatId, pluginId }).debug('Chat publication dropped: plugin not enabled for chat');
+        return;
+      }
+
+      const now = Date.now();
+      const runtimeEvent: RuntimePluginEvent = {
+        type: 'runtime',
+        kind: 'plugin_event',
+        chatId,
+        receivedAtMs: now,
+        timestampSec: Math.floor(now / 1000),
+        utcOffsetMin: -new Date().getTimezoneOffset(),
+        plugin: pluginId,
+        text: options.text,
+      };
+
+      deps.eventSink.accept(runtimeEvent, {
+        notifyDriver: options.wake ?? false,
+      });
+    };
+
+    return {
+      callModel,
+      http: { route },
+      chat: { publish },
+      storage: {
+        get rootDir() {
+          mkdirSync(dataRoot, { recursive: true });
+          return dataRoot;
+        },
+      },
+      log: wrapLogger(pluginLog),
+      media: {
+        send: async (_chatId, media) => {
+          throw new Error(`media.send is unsupported in this host: ${media.kind}`);
+        },
+      },
+    };
+  };
+
+  const start = async (): Promise<void> => {
+    if (running) return;
+
+    for (const plugin of deps.plugins) {
+      if (plugin.sdkVersion !== CURRENT_SDK_VERSION) {
+        throw new Error(
+          `Plugin ${plugin.id} requires SDK version ${plugin.sdkVersion}, but host supports ${CURRENT_SDK_VERSION}`,
+        );
+      }
+
+      if (!isPluginEnabled(plugin.id)) {
+        hostLogger.withFields({ pluginId: plugin.id }).debug('Plugin disabled in config');
+        continue;
+      }
+
+      let rawConfig: unknown = deps.config.plugins?.[plugin.id] ?? {};
+      if (plugin.configSchema) {
+        const parsed = v.safeParse(plugin.configSchema as v.BaseSchema<unknown, unknown, v.BaseIssue<unknown>>, rawConfig);
+        if (!parsed.success) {
+          throw new Error(`Plugin ${plugin.id} configuration failed validation: ${parsed.issues.map(i => i.message).join('; ')}`);
+        }
+        rawConfig = parsed.output;
+      }
+
+      const capabilities = createCapabilities(plugin.id);
+      const ctx: PluginContext<unknown> = {
+        config: rawConfig,
+        capabilities,
+      };
+
+      if (plugin.contributes?.httpRoutes) {
+        for (const r of plugin.contributes.httpRoutes) {
+          httpServer.registerRoute(r);
+        }
+      }
+
+      if (plugin.contributes?.promptHints) {
+        activePromptHints.set(plugin.id, plugin.contributes.promptHints);
+      }
+
+      await (plugin.setup as (ctx: PluginContext<unknown>) => Promise<void> | void)(ctx);
+      activePlugins.set(plugin.id, plugin);
+      hostLogger.withFields({ pluginId: plugin.id }).log('Plugin started');
+    }
+
+    if (httpServer.hasRoutes()) {
+      const serverConf = (deps.config.plugins?.server ?? {}) as { host?: string; port?: number };
+      const host = serverConf.host ?? '0.0.0.0';
+      const port = serverConf.port ?? 8787;
+      await httpServer.start(host, port);
+    }
+
+    running = true;
+  };
+
+  const stop = async (): Promise<void> => {
+    if (!running) return;
+    const errors: unknown[] = [];
+
+    for (const [id, plugin] of activePlugins) {
+      try {
+        await plugin.stop?.();
+      } catch (err) {
+        errors.push(err);
+        hostLogger.withError(err).withFields({ pluginId: id }).error('Error stopping plugin');
+      }
+    }
+    activePlugins.clear();
+    activePromptHints.clear();
+
+    try {
+      await httpServer.stop();
+    } catch (err) {
+      errors.push(err);
+      hostLogger.withError(err).error('Error stopping plugin HTTP server');
+    }
+
+    running = false;
+    if (errors.length > 0) {
+      throw new AggregateError(errors, 'Plugin host shutdown failed');
+    }
+  };
+
+  const getSystemPromptHints = (chatId: string): string[] => {
+    const hints: string[] = [];
+    for (const [pluginId, hintFn] of activePromptHints) {
+      if (!isPluginEnabledForChat(chatId, pluginId)) continue;
+      const contributed = hintFn(chatId);
+      if (contributed) {
+        for (const h of contributed) {
+          if (h.placement === 'system') hints.push(h.text);
+        }
+      }
+    }
+    return hints;
+  };
+
+  return {
+    start,
+    stop,
+    isRunning: () => running,
+    getHttpServer: () => httpServer,
+    getSystemPromptHints,
+  };
+};

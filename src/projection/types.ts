@@ -101,7 +101,7 @@ export type ICSystemEvent =
   | ICChatPhotoDeletedEvent
   | ICMessagePinnedEvent;
 
-export interface ICRuntimeEvent {
+export interface ICRuntimeTaskCompletedEvent {
   type: 'runtime_event';
   kind: 'task_completed';
   receivedAtMs: number;
@@ -113,6 +113,18 @@ export interface ICRuntimeEvent {
   finalSummary: string;
   hasFullOutput: boolean;
 }
+
+export interface ICRuntimePluginEvent {
+  type: 'runtime_event';
+  kind: 'plugin_event';
+  receivedAtMs: number;
+  timestampSec: number;
+  utcOffsetMin: number;
+  plugin: string;
+  text: string;
+}
+
+export type ICRuntimeEvent = ICRuntimeTaskCompletedEvent | ICRuntimePluginEvent;
 
 export type ICNode = ICMessage | ICSystemEvent | ICRuntimeEvent;
 

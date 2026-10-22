@@ -12,8 +12,19 @@ export interface RuntimeTaskCompletedEvent {
   hasFullOutput: boolean;
 }
 
+export interface RuntimePluginEvent {
+  type: 'runtime';
+  kind: 'plugin_event';
+  chatId: string;
+  receivedAtMs: number;
+  timestampSec: number;
+  utcOffsetMin: number;
+  plugin: string;
+  text: string;
+}
+
 // Extensible: future runtime event kinds can be added here.
-export type RuntimeEvent = RuntimeTaskCompletedEvent;
+export type RuntimeEvent = RuntimeTaskCompletedEvent | RuntimePluginEvent;
 
 // Stored in the events table's runtimeData JSON column.
 export interface RuntimeTaskCompletedData {
@@ -25,4 +36,10 @@ export interface RuntimeTaskCompletedData {
   hasFullOutput: boolean;
 }
 
-export type RuntimeEventData = RuntimeTaskCompletedData;
+export interface RuntimePluginEventData {
+  kind: 'plugin_event';
+  plugin: string;
+  text: string;
+}
+
+export type RuntimeEventData = RuntimeTaskCompletedData | RuntimePluginEventData;

@@ -1,6 +1,6 @@
 [Unit]
 Description=LarkBot sandbox firewall check (logs loudly when egress rules are missing)
-Documentation=https://github.com/aronnaxlin/LarkBot/blob/main/docs/deploy.md
+Documentation=https://github.com/aronnaxlin/LuckyBot/blob/main/docs/deploy.md
 After=larkbot-firewall.service
 
 [Service]

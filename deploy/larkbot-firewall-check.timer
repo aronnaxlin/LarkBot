@@ -1,6 +1,6 @@
 [Unit]
 Description=Run the LarkBot sandbox firewall check every 5 minutes
-Documentation=https://github.com/aronnaxlin/LarkBot/blob/main/docs/deploy.md
+Documentation=https://github.com/aronnaxlin/LuckyBot/blob/main/docs/deploy.md
 
 [Timer]
 OnBootSec=1min

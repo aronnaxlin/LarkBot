@@ -62,7 +62,7 @@ The sections below are the coordinator's running log, kept as historical
 snapshots. Their "offline-tested only" caveats were superseded by the live
 runs above; [Turn liveness](#turn-liveness-2026-10-17) remains current behavior.
 
-2026-10-16 — Work on `integration/feishu-participation`; PR: https://github.com/aronnaxlin/LarkBot/pull/1.
+2026-10-16 — Work on `integration/feishu-participation`; PR: https://github.com/aronnaxlin/LuckyBot/pull/1.
 
 A and B's changes have been combined in this worktree. A's follow-up integration was interrupted by the Claude session limit (reported reset: 22:30 Asia/Taipei); do not assume its integration/documentation tasks are complete. No model switch, real credentials, live Feishu connection, commit, or push was performed by the coordinating agent.
 

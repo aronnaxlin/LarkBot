@@ -1,6 +1,6 @@
 [Unit]
 Description=LarkBot sandbox egress firewall (iptables DOCKER-USER + INPUT)
-Documentation=https://github.com/aronnaxlin/LarkBot/blob/main/docs/deploy.md
+Documentation=https://github.com/aronnaxlin/LuckyBot/blob/main/docs/deploy.md
 # Apply the rules before the Docker daemon starts, so the sandbox normally
 # never comes up unfiltered. DOCKER-USER is created by the script if it does
 # not exist yet; Docker reuses an existing chain. Not RequiredBy docker: a

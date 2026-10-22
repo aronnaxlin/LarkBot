@@ -270,6 +270,6 @@ Single-thread mode (one agent working directly with the maintainer, no parallel 
 
 ## Upstream And Ports
 
-`origin` is the public LuckyBot repository (`aronnaxlin/LarkBot`, MIT); `upstream` is `Menci/Cahciua`. There is no configured Edelweiss downstream workflow. Do not create remotes, synchronize repositories, or open upstream PRs unless requested.
+`origin` is the public LuckyBot repository (`aronnaxlin/LuckyBot`, MIT); `upstream` is `Menci/Cahciua`. There is no configured Edelweiss downstream workflow. Do not create remotes, synchronize repositories, or open upstream PRs unless requested.
 
 Preserve source authorship and reference source commits when porting changes. Original work follows the Commit Identity rules above. Evaluate ports against LuckyBot's goals rather than inherited upstream feature bans; do not import another deployment's persona, secrets, or infrastructure configuration. Keep unrelated changes out of the same commit.

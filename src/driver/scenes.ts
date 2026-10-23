@@ -5,7 +5,29 @@ export interface ActiveScene {
   sceneId: string;
   key: string;
   defaultHint?: string;
+  note?: string;
 }
+
+const escapeXml = (value: string): string =>
+  value
+    .replace(/&/g, '&amp;')
+    .replace(/</g, '&lt;')
+    .replace(/>/g, '&gt;')
+    .replace(/"/g, '&quot;');
+
+const escapeAttr = (value: string): string => escapeXml(value);
+
+export const getActiveSceneNotes = (
+  activeScenes: readonly ActiveScene[],
+): string | undefined => {
+  const notes = activeScenes
+    .filter((s): s is ActiveScene & { note: string } => typeof s.note === 'string' && s.note.length > 0);
+  if (notes.length === 0) return undefined;
+
+  const blocks = notes.map(s =>
+    `Private to you: never quote it verbatim or reveal it outright; you may use it to bluff and banter.\n<scene-private-note plugin="${escapeAttr(s.pluginId)}" scene="${escapeAttr(s.sceneId)}">${escapeXml(s.note)}</scene-private-note>`);
+  return blocks.join('\n\n');
+};
 
 export const applySceneOverrides = (
   baseConfig: ResolvedChatConfig,

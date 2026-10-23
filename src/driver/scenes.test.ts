@@ -2,7 +2,7 @@ import * as v from 'valibot';
 import { describe, expect, it } from 'vitest';
 
 import { renderLateBindingPrompt } from './prompt';
-import { applySceneOverrides, getActiveSceneHint, type ActiveScene } from './scenes';
+import { applySceneOverrides, getActiveSceneHint, getActiveSceneNotes, type ActiveScene } from './scenes';
 import { SceneProfileSchema, type ResolvedChatConfig } from '../config/config';
 
 describe('scene overrides', () => {
@@ -210,5 +210,89 @@ describe('scene overrides', () => {
       sceneHint: undefined,
     });
     expect(probePrompt).not.toContain('Config override hint');
+  });
+
+  describe('getActiveSceneNotes and private note rendering', () => {
+    it('returns undefined when no scene has a note or activeScenes is empty', () => {
+      expect(getActiveSceneNotes([])).toBeUndefined();
+
+      const activeWithoutNote: ActiveScene[] = [
+        {
+          pluginId: 'tavern',
+          sceneId: 'table',
+          key: 'tavern.table',
+          defaultHint: 'Hint',
+        },
+      ];
+      expect(getActiveSceneNotes(activeWithoutNote)).toBeUndefined();
+    });
+
+    it('formats active scene notes with disclaimer and escapes XML in attributes and text', () => {
+      const activeWithNotes: ActiveScene[] = [
+        {
+          pluginId: 'tav<ern>&"id',
+          sceneId: 'tab<le>&"id',
+          key: 'tav.table',
+          note: 'Round 1, target: <K> & hand: [Q & "JOKER"]',
+        },
+      ];
+
+      const renderedNotes = getActiveSceneNotes(activeWithNotes);
+      expect(renderedNotes).toBeDefined();
+      expect(renderedNotes).toContain('Private to you: never quote it verbatim or reveal it outright; you may use it to bluff and banter.');
+      expect(renderedNotes).toContain('<scene-private-note plugin="tav&lt;ern&gt;&amp;&quot;id" scene="tab&lt;le&gt;&amp;&quot;id">');
+      expect(renderedNotes).toContain('Round 1, target: &lt;K&gt; &amp; hand: [Q &amp; &quot;JOKER&quot;]</scene-private-note>');
+    });
+
+    it('renders private note only into primary late-binding prompt, after sceneHint, and never into probe', async () => {
+      const timeNow = '2026-10-22T20:00:00+08:00';
+      const sceneHint = 'Scene hint here.';
+      const sceneNotes = 'Private to you: never quote it verbatim or reveal it outright; you may use it to bluff and banter.\n<scene-private-note plugin="tavern" scene="table">Round: 1</scene-private-note>';
+
+      // Baseline prompt without scene notes
+      const promptWithoutNote = await renderLateBindingPrompt({
+        mode: 'primary',
+        currentChannel: 'feishu',
+        timeNow,
+        sceneHint,
+      });
+
+      // Primary prompt with scene notes
+      const promptWithNote = await renderLateBindingPrompt({
+        mode: 'primary',
+        currentChannel: 'feishu',
+        timeNow,
+        sceneHint,
+        sceneNotes,
+      });
+
+      // Note appears in primary prompt
+      expect(promptWithNote).toContain(sceneNotes);
+      // Note appears after sceneHint
+      expect(promptWithNote.indexOf(sceneHint)).toBeLessThan(promptWithNote.indexOf(sceneNotes));
+      // Prefix up to sceneHint is byte-identical
+      expect(promptWithNote.startsWith(promptWithoutNote)).toBe(true);
+      expect(promptWithNote).toBe(`${promptWithoutNote}\n\n${sceneNotes}`);
+
+      // Probe prompt MUST NOT include scene notes, even if passed
+      const probePrompt = await renderLateBindingPrompt({
+        mode: 'probe',
+        currentChannel: 'feishu',
+        timeNow,
+        sceneNotes,
+      });
+      expect(probePrompt).not.toContain('<scene-private-note');
+      expect(probePrompt).not.toContain('Private to you: never quote it verbatim');
+
+      // Byte-identical check when no scene note is passed vs undefined
+      const promptBaseline = await renderLateBindingPrompt({
+        mode: 'primary',
+        currentChannel: 'feishu',
+        timeNow,
+        sceneHint,
+        sceneNotes: undefined,
+      });
+      expect(promptBaseline).toBe(promptWithoutNote);
+    });
   });
 });

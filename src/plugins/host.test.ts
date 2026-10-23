@@ -762,5 +762,86 @@ describe('Core Plugin Host', () => {
       expect(host.getActiveScenes('oc_disabled_chat')).toEqual([]);
       await host.stop();
     });
+
+    it('manages scene note lifecycle: sets, updates, clears, and drops appropriately', async () => {
+      vi.useFakeTimers();
+      const config = makeMockConfig({ scene_plugin: { enabled: true } });
+      config.chats['oc_scene_chat'] = {
+        plugins: { scene_plugin: { enabled: true } },
+      } as any;
+      config.chats['oc_disabled_chat'] = {
+        plugins: { scene_plugin: { enabled: false } },
+      } as any;
+
+      const { eventSink, logger, logCalls } = createMockDeps();
+      let capturedCaps: PluginCapabilities | undefined;
+
+      const scenePlugin = definePlugin({
+        id: 'scene_plugin',
+        sdkVersion: CURRENT_SDK_VERSION,
+        contributes: {
+          scenes: [{ id: 'arena', hint: 'Arena default hint', idleTimeoutMs: 5000 }],
+        },
+        setup: ctx => {
+          capturedCaps = ctx.capabilities;
+        },
+      });
+
+      const host = createPluginHost({
+        config,
+        eventSink,
+        logger,
+        plugins: [scenePlugin],
+        dataDir: tmpDataDir,
+      });
+
+      await host.start();
+
+      // 1. Setting note when scene is not active is ignored (debug logged)
+      capturedCaps!.scene.note('oc_scene_chat', 'arena', 'private note before active');
+      expect(host.getActiveScenes('oc_scene_chat')).toEqual([]);
+      expect(logCalls.some(c => c.level === 'debug' && c.msg.includes('scene not active'))).toBe(true);
+
+      // 2. Setting note when plugin is disabled for chat is dropped
+      capturedCaps!.scene.note('oc_disabled_chat', 'arena', 'private note disabled chat');
+      expect(logCalls.some(c => c.level === 'debug' && c.msg.includes('plugin not enabled for chat'))).toBe(true);
+
+      // 3. Enter scene and set note
+      capturedCaps!.scene.enter('oc_scene_chat', 'arena');
+      capturedCaps!.scene.note('oc_scene_chat', 'arena', 'Target: K | Hand: [Q, K]');
+      let scenes = host.getActiveScenes('oc_scene_chat');
+      expect(scenes).toHaveLength(1);
+      expect(scenes[0]!.note).toBe('Target: K | Hand: [Q, K]');
+
+      // Note is strictly in-memory: eventSink accept/persist was NEVER called for the note
+      expect(eventSink.accept).not.toHaveBeenCalled();
+      expect(eventSink.persist).not.toHaveBeenCalled();
+
+      // 4. Update note
+      capturedCaps!.scene.note('oc_scene_chat', 'arena', 'Target: K | Hand: [Q] | Last: played [K]');
+      scenes = host.getActiveScenes('oc_scene_chat');
+      expect(scenes[0]!.note).toBe('Target: K | Hand: [Q] | Last: played [K]');
+
+      // 5. Clear note by passing null
+      capturedCaps!.scene.note('oc_scene_chat', 'arena', null);
+      scenes = host.getActiveScenes('oc_scene_chat');
+      expect(scenes[0]!.note).toBeUndefined();
+
+      // 6. Set note again and verify it clears on manual scene exit
+      capturedCaps!.scene.note('oc_scene_chat', 'arena', 'temporary note');
+      expect(host.getActiveScenes('oc_scene_chat')[0]!.note).toBe('temporary note');
+      capturedCaps!.scene.exit('oc_scene_chat', 'arena');
+      expect(host.getActiveScenes('oc_scene_chat')).toEqual([]);
+
+      // 7. Verify note clears on idle expiry
+      capturedCaps!.scene.enter('oc_scene_chat', 'arena');
+      capturedCaps!.scene.note('oc_scene_chat', 'arena', 'note before expiry');
+      expect(host.getActiveScenes('oc_scene_chat')[0]!.note).toBe('note before expiry');
+      vi.advanceTimersByTime(5000);
+      expect(host.getActiveScenes('oc_scene_chat')).toEqual([]);
+
+      await host.stop();
+      vi.useRealTimers();
+    });
   });
 });

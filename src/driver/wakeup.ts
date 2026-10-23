@@ -81,6 +81,8 @@ export const executeWakeup = async (params: {
   promptHints?: string[];
   // Extra late-binding hint contributed by an active scene or scene profile.
   sceneHint?: string;
+  // Private notes contributed by active scenes (primary late-binding only).
+  sceneNotes?: string;
   // Set when retrying this context after primary failed transiently: probe
   // already activated it, so judging again would only add latency.
   probeActivation?: ProbeActivation;
@@ -308,6 +310,7 @@ export const executeWakeup = async (params: {
       brakeMessages10m: participation.brakeMessages10m,
       botRounds: participation.botRounds,
       ...(params.sceneHint ? { sceneHint: params.sceneHint } : {}),
+      ...(params.sceneNotes ? { sceneNotes: params.sceneNotes } : {}),
       ...(memorySnapshot?.primaryXml ? { memoryXml: memorySnapshot.primaryXml } : {}),
     }));
     const tools = (reactOnly

@@ -7,7 +7,7 @@ import type { ProbeWindowState } from './context';
 import type { DriverPlatform } from './platform';
 import { createPrimaryTools } from './primary-tools';
 import { createRunner } from './runner';
-import { applySceneOverrides, getActiveSceneHint, type ActiveScene } from './scenes';
+import { applySceneOverrides, getActiveSceneHint, getActiveSceneNotes, type ActiveScene } from './scenes';
 import { createReplyScheduler } from './scheduler';
 import type { CahciuaTool } from './tools';
 import { isTransientModelError } from './transient-error';
@@ -155,6 +155,7 @@ export const createDriver = (config: DriverConfig, deps: DriverPlatform & {
           const activeScenes = deps.getActiveScenes?.(chatId) ?? [];
           const effectiveChatConfig = applySceneOverrides(chatConfig, activeScenes);
           const sceneHint = getActiveSceneHint(effectiveChatConfig, activeScenes);
+          const sceneNotes = getActiveSceneNotes(activeScenes);
           const runner = createRunner({
             apiBaseUrl: effectiveChatConfig.primary.model.apiBaseUrl,
             apiKey: effectiveChatConfig.primary.model.apiKey,
@@ -191,6 +192,7 @@ export const createDriver = (config: DriverConfig, deps: DriverPlatform & {
             loadMemorySnapshot: memory.loadSnapshot,
             promptHints: deps.getSystemPromptHints?.(chatId),
             sceneHint,
+            sceneNotes,
             log,
           });
           return { kind: 'done' };

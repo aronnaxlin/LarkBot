@@ -85,6 +85,7 @@ export const createPluginHost = (deps: {
     defaultHint?: string;
     idleTimeoutMs: number;
     timer?: NodeJS.Timeout;
+    note?: string;
   }
 
   const activeScenes = new Map<string, Map<string, ActiveSceneState>>();
@@ -272,11 +273,31 @@ export const createPluginHost = (deps: {
       hostLogger.withFields({ chatId, pluginId, sceneId }).debug('Scene exited manually');
     };
 
+    const note = (chatId: string, sceneId: string, text: string | null) => {
+      if (!isPluginEnabledForChat(chatId, pluginId)) {
+        hostLogger.withFields({ chatId, pluginId, sceneId }).debug('Scene note dropped: plugin not enabled for chat');
+        return;
+      }
+      const key = `${pluginId}.${sceneId}`;
+      const chatScenes = activeScenes.get(chatId);
+      const sceneState = chatScenes?.get(key);
+      if (!sceneState) {
+        hostLogger.withFields({ chatId, pluginId, sceneId }).debug('Scene note dropped: scene not active');
+        return;
+      }
+      if (text === null) {
+        delete sceneState.note;
+      } else {
+        sceneState.note = text;
+      }
+      hostLogger.withFields({ chatId, pluginId, sceneId }).debug('Scene note updated');
+    };
+
     return {
       callModel,
       http: { route },
       chat: { publish },
-      scene: { enter, exit },
+      scene: { enter, exit, note },
       storage: {
         get rootDir() {
           mkdirSync(dataRoot, { recursive: true });
@@ -485,6 +506,7 @@ export const createPluginHost = (deps: {
       sceneId: s.sceneId,
       key: s.key,
       defaultHint: s.defaultHint,
+      note: s.note,
     }));
   };
 

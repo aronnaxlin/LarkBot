@@ -117,10 +117,11 @@ When allowed, the event is saved in the database as a generic runtime event (`ki
 
 ### 4. `scene`
 
-Enters or exits contextual scenes contributed by the plugin:
+Enters, exits, or annotates contextual scenes contributed by the plugin:
 
 - `ctx.capabilities.scene.enter(chatId, sceneId)`: Activates the scene `<pluginId>.<sceneId>` for the chat. Refreshes the scene's inactivity timeout (`idleTimeoutMs`, default 10 min).
 - `ctx.capabilities.scene.exit(chatId, sceneId)`: Exits the scene manually for the chat.
+- `ctx.capabilities.scene.note(chatId, sceneId, text | null)`: Sets or clears a private in-memory note for an active scene in this chat. Ignored if the scene is not active or the plugin is disabled for the chat. Automatically cleared on scene exit or idle expiry. Rendered strictly into the primary late-binding prompt.
 - Inactivity timeouts are automatically refreshed whenever the plugin invokes `chat.publish(chatId, ...)` to that chat.
 
 ### 5. `storage`
@@ -149,7 +150,8 @@ The privacy invariant is the most critical security boundary for plugins:
    - Rendered XML Context (`RC`).
    - SQLite `events` or `turn_responses` tables.
    - Long-term person memory.
-   - The Driver's system or user prompts.
+   - Probe prompts.
+   Private state may reach the model only via `scene.note`, which injects strictly into the primary late-binding prompt (in-memory only, never persisted).
 3. **Public Events Only**: Plugins only push public, broadcast-safe text through `chat.publish`.
 4. **Mandatory Testing**: Every plugin handling private data must include automated regression tests asserting that private data is never forwarded to `chat.publish`.
 

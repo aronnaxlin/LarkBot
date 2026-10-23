@@ -217,10 +217,12 @@ chats:
         enabled: false
     scenes:
       tavern.table:
-        hint: "You are currently participating in a mini-game table in this group. Keep table talk short, in character, and stay in persona."
+        # Note: The dealer is itself a bot, so botRounds must be generous in this scene
+        # to allow lively back-and-forth banter at the table.
+        hint: "你在牌桌上：每一手可以配一两句台词，像牌桌上演戏；可以报概率、吹牛、试探、虚张声势；私密备注里的牌面别直接报出来；不用每个事件都接话。"
         participation:
-          botRounds: 2
-          brakeMessages10m: 12
+          botRounds: 8
+          brakeMessages10m: 30
         primary:
           extraBody:
             reasoning_effort: "low"

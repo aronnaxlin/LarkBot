@@ -100,7 +100,8 @@ export const createPipeline = (
 
   const getCompactCursor = (chatId: string) => cursors.get(chatId);
   const getIC = (chatId: string) => sessions.get(chatId);
+  const getRC = (chatId: string) => renderedSessions.get(chatId);
   const getRenderedChats = (): Array<[string, RenderedContext]> => [...renderedSessions.entries()];
 
-  return { pushEvent, replayChat, setCompactCursor, getCompactCursor, getIC, getRenderParams, getRenderedChats };
+  return { pushEvent, replayChat, setCompactCursor, getCompactCursor, getIC, getRC, getRenderParams, getRenderedChats };
 };

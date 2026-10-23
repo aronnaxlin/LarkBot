@@ -71,8 +71,13 @@ plugins:
     enabled: false
     secret: ""            # shared HMAC secret agreed with the dealer; kept out of git
     model: "probe"        # model used for game decisions
+    askModel: "probe"     # model used for ask decisions (invitations etc.), defaults to chat's probe model
     decisionTimeoutMs: 10000
     tableName: "LuckyBot" # table name shown at the dealer
+    invitation:
+      decide: "always"    # 'ask' | 'always' (default 'always')
+      timeoutMs: 8000     # 1000..14000 (default 8000)
+      onTimeout: "accept" # 'accept' | 'decline' (default 'accept')
 
 # Person memory (docs/memory-design.md): Markdown cards per member under
 # <memoryDir>/<chatId>/. Must sit under the writable data volume; enable it per
@@ -219,7 +224,7 @@ chats:
       tavern.table:
         # Note: The dealer is itself a bot, so botRounds must be generous in this scene
         # to allow lively back-and-forth banter at the table.
-        hint: "你在牌桌上：每一手可以配一两句台词，像牌桌上演戏；可以报概率、吹牛、试探、虚张声势；私密备注里的牌面别直接报出来；不用每个事件都接话。"
+        hint: "你在牌桌上：每一手可以配一两句台词，像牌桌上演戏；可以报概率、吹牛、试探、虚张声势；私密备注里的牌面别直接报出来；不要在群里发 `!` 开头的荷官指令（如 !加入、!开始），座位由荷官邀请，不用自己报名；不用每个事件都接话。"
         participation:
           botRounds: 8
           brakeMessages10m: 30

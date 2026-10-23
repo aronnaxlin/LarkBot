@@ -138,6 +138,37 @@ Provides a scoped logger (`ctx.capabilities.log`) outputting under context `plug
 
 Interface stub for sending outbound media. In the current release, invoking this method throws a typed error (`media.send is unsupported`).
 
+### 8. `ask(chatId, options)`
+
+Additive capability for a plugin to ask the bot a targeted multiple-choice question "in character":
+
+```ts
+const { choice, reason } = await ctx.capabilities.ask(chatId, {
+  question: '荷官邀请你上桌，要加入吗？',
+  choices: ['接受', '拒绝'], // 2 to 5 choices
+  timeoutMs: 8000,           // optional, capped at 14000
+});
+```
+
+- **Execution Context**: Runs a single non-streaming model call. The system prompt is populated with the chat's persona (`systemFiles` content) and bot instructions. The user prompt contains a compact context block assembled entirely by core:
+  - Current local time.
+  - Participation signals (recent self messages in 10m, seconds since last message, consecutive bot exchanges).
+  - The chat's `SELF.md` memory notes (if person memory is enabled for the chat).
+  - The tail of rendered chatlog segments as XML (up to 30 segments).
+  - The question and allowed choices.
+- **Strict Isolation**: Plugins **never receive or inspect** this context block, chatlog, or memory notes; they receive solely `{ choice, reason }`.
+- **Gating**: Rejected immediately if the plugin is not enabled for the target chat.
+- **Model Resolution**: Uses `plugins.<id>.askModel` if configured in core, otherwise defaults to the chat's probe model.
+- **Output & Cost Note**: The model is prompted to emit tiny JSON (`{"choice": "...", "reason": "..."}`). The choice is strictly validated against the allowed choices (exact match after trimming whitespace). If the model fails or times out, the call rejects; the plugin decides its own fallback. It is designed to be inexpensive (short context, tiny output tokens).
+
+### 9. `isEnabledForChat(chatId)`
+
+Helper available on both `ctx` and `ctx.capabilities` to check whether the plugin is enabled for a given chat:
+
+```ts
+const isEnabled = ctx.isEnabledForChat ? ctx.isEnabledForChat(chatId) : ctx.capabilities.isEnabledForChat?.(chatId);
+```
+
 ---
 
 ## 4. Privacy Invariant

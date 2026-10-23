@@ -16,11 +16,18 @@ import {
   type PluginTool,
   type PromptHint,
 } from '../../plugins/src/sdk';
-import { mergeChatConfig, resolveModel, type Config } from '../config/config';
+import { mergeChatConfig, resolveChatConfig, resolveModel, type Config } from '../config/config';
+import { computeParticipationStats } from '../driver/participation-stats';
 import type { ActiveScene } from '../driver/scenes';
 import { createTool, type CahciuaTool } from '../driver/tools';
+import { localTimeNow } from '../driver/wakeup';
 import type { EventSink } from '../event-sink';
 import { callLlm, type LlmCallConfig } from '../llm/call';
+import { renderEntries } from '../memory/injection';
+import type { MemoryBackend } from '../memory/types';
+import type { IntermediateContext } from '../projection';
+import { rcToXml } from '../rendering';
+import type { RenderedContext, RenderParams } from '../rendering';
 import type { RuntimePluginEvent } from '../runtime-event';
 import type { ConversationEntry, OutputMessage, TextPart } from '../unified-api/types';
 
@@ -54,6 +61,17 @@ export interface PluginHostDeps {
   logger: Logger;
   plugins: readonly PluginDefinition<unknown>[];
   dataDir?: string;
+  pipeline?: {
+    getRC?: (chatId: string) => RenderedContext | undefined;
+    getIC?: (chatId: string) => IntermediateContext | undefined;
+    getRenderParams?: (chatId: string) => RenderParams;
+  };
+  memoryBackend?: MemoryBackend;
+  callModelOverride?: (
+    modelName: string,
+    prompt: string | { system?: string; user: string },
+    options?: { timeoutSec?: number; dumpId?: string },
+  ) => Promise<string>;
 }
 
 const wrapLogger = (logger: Logger): PluginLogger => ({
@@ -65,14 +83,7 @@ const wrapLogger = (logger: Logger): PluginLogger => ({
   withError: err => wrapLogger(logger.withError(err)),
 });
 
-export const createPluginHost = (deps: {
-  config: Config;
-  eventSink: EventSink;
-  logger: Logger;
-  plugins: readonly PluginDefinition<unknown>[];
-  dataDir?: string;
-  callModelOverride?: (modelName: string, prompt: string, options?: { timeoutSec?: number; dumpId?: string }) => Promise<string>;
-}): PluginHost => {
+export const createPluginHost = (deps: PluginHostDeps): PluginHost => {
   const hostLogger = deps.logger.withContext('plugin-host');
   const httpServer = createPluginHttpServer(deps.logger.withContext('plugin-http'));
   const activePlugins = new Map<string, PluginDefinition<unknown>>();
@@ -293,8 +304,191 @@ export const createPluginHost = (deps: {
       hostLogger.withFields({ chatId, pluginId, sceneId }).debug('Scene note updated');
     };
 
+    const isEnabledForChat = (chatId: string): boolean => isPluginEnabledForChat(chatId, pluginId);
+
+    const ask: PluginCapabilities['ask'] = async (chatId, options) => {
+      if (!isPluginEnabledForChat(chatId, pluginId)) {
+        throw new Error(`Plugin "${pluginId}" is not enabled for chat "${chatId}"`);
+      }
+
+      if (
+        !options ||
+        typeof options.question !== 'string' ||
+        options.question.trim().length === 0 ||
+        !Array.isArray(options.choices) ||
+        options.choices.length < 2 ||
+        options.choices.length > 5 ||
+        options.choices.some(c => typeof c !== 'string' || c.trim().length === 0)
+      ) {
+        throw new Error('ask requires a question and 2 to 5 non-empty string choices');
+      }
+
+      const timeoutMs = Math.min(14000, Math.max(1, options.timeoutMs ?? 10000));
+      const timeoutSec = Math.max(1, Math.ceil(timeoutMs / 1000));
+
+      const resolved = resolveChatConfig(deps.config, chatId);
+      const pluginConf = deps.config.plugins?.[pluginId] as Record<string, unknown> | undefined;
+      const askModelName = typeof pluginConf?.askModel === 'string' ? pluginConf.askModel : undefined;
+      const endpoint = askModelName ? resolveModel(deps.config, askModelName) : resolved.probe.model;
+
+      const systemParts: string[] = [];
+      if (resolved.systemFiles.length > 0) {
+        systemParts.push('## Your personality description files');
+        for (const file of resolved.systemFiles) {
+          systemParts.push(`## ${file.filename}\n\n${file.content}`);
+        }
+      }
+      systemParts.push('Answer as yourself. Pick exactly one of the choices.\nOutput JSON only: {"choice": "...", "reason": "..."}');
+      const systemPrompt = systemParts.join('\n\n');
+
+      const timeNow = localTimeNow();
+      const rc = deps.pipeline?.getRC?.(chatId) ?? [];
+      const stats = computeParticipationStats({ segments: rc, nowMs: Date.now() });
+
+      let selfNotes: string | undefined;
+      if (resolved.memory.enabled && deps.memoryBackend) {
+        try {
+          const selfCard = deps.memoryBackend.readSelf(chatId);
+          if (selfCard.entries.length > 0) {
+            selfNotes = renderEntries(selfCard.entries, resolved.memory.selfInjectionChars);
+          }
+        } catch (err) {
+          pluginLog.withFields({ chatId, error: err }).debug('Failed to read SELF.md for ask');
+        }
+      }
+
+      const tailSegments = rc.slice(-30);
+      const chatlogXml = tailSegments.length > 0 ? rcToXml(tailSegments) : '';
+
+      const contextBlocks: string[] = [
+        `Current time: ${timeNow}`,
+        `Participation stats:\n- Recent self messages (10m): ${stats.recentSelfMessages10m}${stats.secondsSinceLastSelfMessage !== undefined ? `\n- Seconds since last self message: ${stats.secondsSinceLastSelfMessage}` : ''}\n- Consecutive bot exchanges: ${stats.consecutiveBotExchanges}`,
+      ];
+      if (selfNotes) {
+        contextBlocks.push(`<memory-self>\n${selfNotes}\n</memory-self>`);
+      }
+      if (chatlogXml) {
+        contextBlocks.push(`<chatlog>\n${chatlogXml}\n</chatlog>`);
+      }
+
+      const userPrompt = [
+        '## Context',
+        contextBlocks.join('\n\n'),
+        '## Question',
+        options.question,
+        '## Choices',
+        options.choices.map(c => `- ${c}`).join('\n'),
+        'Pick exactly one choice from the list above. Respond with JSON only: {"choice": "...", "reason": "..."}',
+      ].join('\n\n');
+
+      const startMs = Date.now();
+
+      const doCall = async (): Promise<string> => {
+        if (deps.callModelOverride) {
+          return await deps.callModelOverride(
+            askModelName ?? endpoint.model,
+            { system: systemPrompt, user: userPrompt },
+            { timeoutSec, dumpId: `${chatId}.ask` },
+          );
+        }
+
+        const llmConfig: LlmCallConfig = {
+          apiBaseUrl: endpoint.apiBaseUrl,
+          apiKey: endpoint.apiKey,
+          model: endpoint.model,
+          apiFormat: endpoint.apiFormat,
+          extraBody: endpoint.extraBody,
+          timeoutSec,
+        };
+
+        const entries: ConversationEntry[] = [
+          {
+            kind: 'message',
+            role: 'user',
+            parts: [{ kind: 'text', text: userPrompt }],
+          },
+        ];
+
+        const result = await callLlm(
+          llmConfig,
+          entries,
+          systemPrompt,
+          undefined,
+          {
+            log: pluginLog,
+            label: `plugin:${pluginId}:ask`,
+            dumpId: `${chatId}.ask`,
+          },
+        );
+
+        return result.entries
+          .filter((e): e is OutputMessage => e.kind === 'message' && e.role === 'assistant')
+          .flatMap(e => e.parts)
+          .filter((p): p is TextPart => p.kind === 'text')
+          .map(p => p.text)
+          .join('\n');
+      };
+
+      let timer: NodeJS.Timeout | undefined;
+      const timeoutPromise = new Promise<never>((_, reject) => {
+        timer = setTimeout(() => {
+          reject(new Error(`ask timed out after ${timeoutMs}ms`));
+        }, timeoutMs);
+        if (timer.unref) timer.unref();
+      });
+
+      let rawText: string;
+      try {
+        rawText = await Promise.race([doCall(), timeoutPromise]);
+      } finally {
+        if (timer) clearTimeout(timer);
+      }
+
+      const stripped = rawText.trim().replace(/^```(?:json)?\s*/i, '').replace(/\s*```$/i, '').trim();
+      let parsedJson: unknown;
+      try {
+        parsedJson = JSON.parse(stripped);
+      } catch {
+        const match = stripped.match(/\{[\s\S]*\}/);
+        if (match) {
+          parsedJson = JSON.parse(match[0]);
+        } else {
+          throw new Error(`Failed to parse model response as JSON: ${rawText}`);
+        }
+      }
+
+      if (!parsedJson || typeof parsedJson !== 'object') {
+        throw new Error('Model response is not a JSON object');
+      }
+
+      const rawChoice = (parsedJson as Record<string, unknown>).choice;
+      if (typeof rawChoice !== 'string') {
+        throw new Error('Model response missing string "choice" field');
+      }
+
+      const trimmedChoice = rawChoice.trim();
+      const matchedChoice = options.choices.find(c => c.trim() === trimmedChoice);
+      if (!matchedChoice) {
+        throw new Error(`Model choice "${trimmedChoice}" is not one of: ${options.choices.join(', ')}`);
+      }
+
+      const latencyMs = Date.now() - startMs;
+      hostLogger.withFields({ chatId, pluginId, choice: matchedChoice, latencyMs }).debug('ask completed');
+
+      const reason = typeof (parsedJson as Record<string, unknown>).reason === 'string'
+        ? ((parsedJson as Record<string, unknown>).reason as string).trim()
+        : undefined;
+
+      return {
+        choice: matchedChoice,
+        ...(reason ? { reason } : {}),
+      };
+    };
+
     return {
       callModel,
+      ask,
+      isEnabledForChat,
       http: { route },
       chat: { publish },
       scene: { enter, exit, note },
@@ -387,6 +581,7 @@ export const createPluginHost = (deps: {
       const ctx: PluginContext<unknown> = {
         config: rawConfig,
         capabilities,
+        isEnabledForChat: (chatId: string) => isPluginEnabledForChat(chatId, plugin.id),
       };
 
       if (plugin.contributes?.httpRoutes) {

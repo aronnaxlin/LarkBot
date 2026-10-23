@@ -51,7 +51,15 @@ const makeMockConfig = (pluginOverrides: Record<string, unknown> = {}): Config =
       imageToText: {},
       animationToText: {},
       customEmojiToText: {},
-      tools: {},
+      tools: {
+        banSpammer: false,
+        bash: {
+          enabled: false,
+          backgroundThresholdSec: 10,
+          requireMaintainer: true,
+          maintainerWindowSec: 600,
+        },
+      },
       plugins: {},
     },
     [CHAT_ENABLED]: {
@@ -842,6 +850,296 @@ describe('Core Plugin Host', () => {
 
       await host.stop();
       vi.useRealTimers();
+    });
+  });
+
+  describe('ask capability', () => {
+    it('gates by chat: rejects when plugin is not enabled for chat', async () => {
+      const config = makeMockConfig({ test_plugin: { enabled: true } });
+      const { eventSink, logger } = createMockDeps();
+      let capturedCaps: PluginCapabilities | undefined;
+
+      const plugin = definePlugin({
+        id: 'test_plugin',
+        sdkVersion: CURRENT_SDK_VERSION,
+        setup: ctx => {
+          capturedCaps = ctx.capabilities;
+        },
+      });
+
+      const host = createPluginHost({
+        config,
+        eventSink,
+        logger,
+        plugins: [plugin],
+        dataDir: tmpDataDir,
+      });
+
+      await host.start();
+
+      expect(capturedCaps!.isEnabledForChat!(CHAT_ENABLED)).toBe(true);
+      expect(capturedCaps!.isEnabledForChat!(CHAT_DISABLED)).toBe(false);
+
+      await expect(
+        capturedCaps!.ask(CHAT_DISABLED, {
+          question: '上不上桌？',
+          choices: ['接受', '拒绝'],
+        }),
+      ).rejects.toThrow('not enabled for chat');
+
+      await host.stop();
+    });
+
+    it('validates choices and question strictly', async () => {
+      const config = makeMockConfig({ test_plugin: { enabled: true } });
+      const { eventSink, logger } = createMockDeps();
+      let capturedCaps: PluginCapabilities | undefined;
+
+      const plugin = definePlugin({
+        id: 'test_plugin',
+        sdkVersion: CURRENT_SDK_VERSION,
+        setup: ctx => {
+          capturedCaps = ctx.capabilities;
+        },
+      });
+
+      const host = createPluginHost({
+        config,
+        eventSink,
+        logger,
+        plugins: [plugin],
+        dataDir: tmpDataDir,
+      });
+
+      await host.start();
+
+      // <2 choices
+      await expect(
+        capturedCaps!.ask(CHAT_ENABLED, {
+          question: 'Q?',
+          choices: ['A'],
+        }),
+      ).rejects.toThrow('2 to 5');
+
+      // >5 choices
+      await expect(
+        capturedCaps!.ask(CHAT_ENABLED, {
+          question: 'Q?',
+          choices: ['1', '2', '3', '4', '5', '6'],
+        }),
+      ).rejects.toThrow('2 to 5');
+
+      // Empty question
+      await expect(
+        capturedCaps!.ask(CHAT_ENABLED, {
+          question: '',
+          choices: ['A', 'B'],
+        }),
+      ).rejects.toThrow('requires a question');
+
+      await host.stop();
+    });
+
+    it('rejects on invalid model response: non-JSON, missing choice, or unknown choice', async () => {
+      const config = makeMockConfig({ test_plugin: { enabled: true } });
+      const { eventSink, logger } = createMockDeps();
+      let capturedCaps: PluginCapabilities | undefined;
+      let modelReply = 'not json';
+
+      const plugin = definePlugin({
+        id: 'test_plugin',
+        sdkVersion: CURRENT_SDK_VERSION,
+        setup: ctx => {
+          capturedCaps = ctx.capabilities;
+        },
+      });
+
+      const host = createPluginHost({
+        config,
+        eventSink,
+        logger,
+        plugins: [plugin],
+        dataDir: tmpDataDir,
+        callModelOverride: async () => modelReply,
+      });
+
+      await host.start();
+
+      // 1. Non-JSON
+      await expect(
+        capturedCaps!.ask(CHAT_ENABLED, {
+          question: 'Q?',
+          choices: ['接受', '拒绝'],
+        }),
+      ).rejects.toThrow('JSON');
+
+      // 2. Missing choice field
+      modelReply = '{"reason": "no choice"}';
+      await expect(
+        capturedCaps!.ask(CHAT_ENABLED, {
+          question: 'Q?',
+          choices: ['接受', '拒绝'],
+        }),
+      ).rejects.toThrow('missing string "choice"');
+
+      // 3. Unknown choice
+      modelReply = '{"choice": "随便", "reason": "whatever"}';
+      await expect(
+        capturedCaps!.ask(CHAT_ENABLED, {
+          question: 'Q?',
+          choices: ['接受', '拒绝'],
+        }),
+      ).rejects.toThrow('not one of');
+
+      await host.stop();
+    });
+
+    it('enforces timeout and timeout cap', async () => {
+      vi.useFakeTimers();
+      const config = makeMockConfig({ test_plugin: { enabled: true } });
+      const { eventSink, logger } = createMockDeps();
+      let capturedCaps: PluginCapabilities | undefined;
+
+      const plugin = definePlugin({
+        id: 'test_plugin',
+        sdkVersion: CURRENT_SDK_VERSION,
+        setup: ctx => {
+          capturedCaps = ctx.capabilities;
+        },
+      });
+
+      const host = createPluginHost({
+        config,
+        eventSink,
+        logger,
+        plugins: [plugin],
+        dataDir: tmpDataDir,
+        callModelOverride: async () =>
+          await new Promise(resolve => {
+            setTimeout(() => resolve('{"choice": "接受"}'), 5000);
+          }),
+      });
+
+      await host.start();
+
+      const askPromise = capturedCaps!.ask(CHAT_ENABLED, {
+        question: 'Q?',
+        choices: ['接受', '拒绝'],
+        timeoutMs: 2000,
+      });
+
+      vi.advanceTimersByTime(2000);
+
+      await expect(askPromise).rejects.toThrow('timed out after 2000ms');
+
+      await host.stop();
+      vi.useRealTimers();
+    });
+
+    it('assembles context correctly and returns only { choice, reason }', async () => {
+      const config = makeMockConfig({
+        test_plugin: {
+          enabled: true,
+          askModel: 'probe',
+        },
+      });
+
+      // Provide systemFiles in config
+      (config.chats[CHAT_ENABLED] as any).systemFiles = [];
+      const identityFile = join(tmpDataDir, 'IDENTITY.md');
+      const { writeFileSync } = await import('node:fs');
+      writeFileSync(identityFile, 'You are Lucky, a witty Shiba Inu bot.');
+      (config.chats[CHAT_ENABLED] as any).systemFiles = [identityFile];
+
+      // Enable memory
+      (config.chats[CHAT_ENABLED] as any).memory = {
+        enabled: true,
+        selfInjectionChars: 500,
+      };
+
+      const mockMemoryBackend: any = {
+        readSelf: vi.fn(() => ({
+          header: '# SELF',
+          entries: [
+            { date: '2026-10-22', evidence: [], text: '喜欢玩骗子酒馆' },
+          ],
+        })),
+      };
+
+      const mockPipeline: any = {
+        getRC: vi.fn(() => [
+          {
+            receivedAtMs: Date.now() - 5000,
+            content: [{ type: 'text', text: '<message id="m1" sender="Alice">来一把？</message>' }],
+          },
+        ]),
+      };
+
+      const { eventSink, logger } = createMockDeps();
+      let capturedCaps: PluginCapabilities | undefined;
+      let lastModelInput: { modelName: string; prompt: any; options?: any } | undefined;
+
+      const plugin = definePlugin({
+        id: 'test_plugin',
+        sdkVersion: CURRENT_SDK_VERSION,
+        setup: ctx => {
+          capturedCaps = ctx.capabilities;
+        },
+      });
+
+      const host = createPluginHost({
+        config,
+        eventSink,
+        logger,
+        plugins: [plugin],
+        dataDir: tmpDataDir,
+        pipeline: mockPipeline,
+        memoryBackend: mockMemoryBackend,
+        callModelOverride: async (modelName, prompt, options) => {
+          lastModelInput = { modelName, prompt, options };
+          return '```json\n{"choice": " 接受 ", "reason": "手痒想玩"}\n```';
+        },
+      });
+
+      await host.start();
+
+      const result = await capturedCaps!.ask(CHAT_ENABLED, {
+        question: '荷官邀请你上桌，要加入吗？',
+        choices: ['接受', '拒绝'],
+      });
+
+      // 1. Result only contains { choice, reason }, trimmed choice matched
+      expect(result).toEqual({
+        choice: '接受',
+        reason: '手痒想玩',
+      });
+      // Context is NOT on the result
+      expect((result as any).context).toBeUndefined();
+      expect((result as any).system).toBeUndefined();
+
+      // 2. Model call options
+      expect(lastModelInput!.options?.dumpId).toBe(`${CHAT_ENABLED}.ask`);
+
+      // 3. System prompt contains persona
+      const systemText = lastModelInput!.prompt.system;
+      expect(systemText).toContain('## Your personality description files');
+      expect(systemText).toContain('IDENTITY.md');
+      expect(systemText).toContain('You are Lucky, a witty Shiba Inu bot.');
+      expect(systemText).toContain('Answer as yourself. Pick exactly one of the choices.');
+
+      // 4. User prompt contains context: time, stats, SELF.md, chatlog tail
+      const userText = lastModelInput!.prompt.user;
+      expect(userText).toContain('Current time:');
+      expect(userText).toContain('Participation stats:');
+      expect(userText).toContain('<memory-self>');
+      expect(userText).toContain('喜欢玩骗子酒馆');
+      expect(userText).toContain('<chatlog>');
+      expect(userText).toContain('<message id="m1" sender="Alice">来一把？</message>');
+      expect(userText).toContain('荷官邀请你上桌，要加入吗？');
+      expect(userText).toContain('- 接受');
+      expect(userText).toContain('- 拒绝');
+
+      await host.stop();
     });
   });
 });

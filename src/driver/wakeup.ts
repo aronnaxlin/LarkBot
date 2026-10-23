@@ -17,7 +17,7 @@ import { callLlm } from '../llm/call';
 import type { MemorySnapshot } from '../memory/injection';
 import type { RenderedContext } from '../rendering/types';
 
-const localTimeNow = (): string => {
+export const localTimeNow = (): string => {
   const now = new Date();
   const offset = -now.getTimezoneOffset();
   const sign = offset >= 0 ? '+' : '-';

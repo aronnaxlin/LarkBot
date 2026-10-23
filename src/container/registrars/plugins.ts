@@ -10,5 +10,7 @@ export const registerPlugins = ({ get, register }: Registrar): void => {
       eventSink: get(TOKENS.EVENT_SINK),
       logger: get(TOKENS.LOGGER),
       plugins,
+      pipeline: get(TOKENS.PIPELINE),
+      memoryBackend: get(TOKENS.MEMORY_BACKEND),
     }));
 };

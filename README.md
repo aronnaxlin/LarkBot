@@ -118,6 +118,10 @@ Never commit credentials, local databases (`data/*.db`), user session tokens, or
 
 Special thanks to **[Menci](https://github.com/Menci)** for creating **[Cahciua (菜花)](https://github.com/Menci/Cahciua)**, providing the foundation and inspiration for this project.
 
+## Sponsors
+
+LuckyBot runs on paid model API calls and hosting, and its presence in the group is sustained by people who choose to fund it. Thanks to **[liuyuze2005](https://github.com/liuyuze2005)** for his financial support, which goes directly toward keeping LuckyBot alive in the chat.
+
 ## License
 
 LuckyBot is released under the [MIT License](LICENSE). It is derived from [Cahciua](https://github.com/Menci/Cahciua), which is MIT-licensed by Menci; the original copyright notice is retained in `LICENSE`.
